@@ -84,6 +84,7 @@ export async function startDevServer(): Promise<void> {
       if (clientFiles.size === 0) return;
 
       const entryPoints = Array.from(clientFiles);
+
       const graph = buildGraph(entryPoints);
 
       clientCtx = await esbuild.context({
@@ -95,7 +96,7 @@ export async function startDevServer(): Promise<void> {
         format: "esm",
         sourcemap: config.build?.sourcemap ?? true,
         splitting: true,
-        minify: config.build?.minify ?? false,
+        minify: config.build?.minify ?? true,
         plugins: [
           ...(config.plugins?.map((cb) => cb(store)) || []),
           ...(config.client_plugins?.map((cb) => cb(store)) || []),

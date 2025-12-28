@@ -2,6 +2,7 @@ import { parseSync } from "@swc/core";
 import * as fs from "fs";
 import * as path from "path";
 import type { Module, Decorator } from "@swc/core";
+import { Store } from "@/store";
 
 type SymbolKind =
   | "class"
@@ -39,9 +40,7 @@ export interface DependencyGraph {
 }
 
 function resolveFilePath(fromFile: string, importPath: string): string | null {
-  if (!importPath.startsWith(".")) {
-    return null;
-  }
+  if (!importPath.startsWith(".")) return null;
 
   const dir = path.dirname(fromFile);
   const basePath = path.resolve(dir, importPath);
@@ -49,37 +48,31 @@ function resolveFilePath(fromFile: string, importPath: string): string | null {
   const extensions = ["", ".ts", ".tsx", ".js", ".jsx"];
   for (const ext of extensions) {
     const fullPath = basePath + ext;
-    if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+    if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile())
       return fullPath;
-    }
   }
 
   const indexFiles = ["/index.ts", "/index.tsx", "/index.js", "/index.jsx"];
   for (const indexFile of indexFiles) {
     const fullPath = basePath + indexFile;
-    if (fs.existsSync(fullPath)) {
+    if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile())
       return fullPath;
-    }
   }
 
   return null;
 }
 
 function extractDecorators(decorators?: Decorator[]): string[] {
-  if (!decorators || decorators.length === 0) return [];
-
+  if (!decorators) return [];
   return decorators
-    .map((decorator) => {
-      if (decorator.expression.type === "CallExpression") {
-        if (decorator.expression.callee.type === "Identifier") {
-          return decorator.expression.callee.value;
-        }
-      } else if (decorator.expression.type === "Identifier") {
-        return decorator.expression.value;
-      }
+    .map((d) => {
+      const exp = d.expression;
+      if (exp.type === "CallExpression" && exp.callee.type === "Identifier")
+        return exp.callee.value;
+      if (exp.type === "Identifier") return exp.value;
       return "unknown";
     })
-    .filter((name) => name !== "unknown");
+    .filter((n) => n !== "unknown");
 }
 
 function extractDirective(ast: Module): "public" | "interactive" | null {
@@ -88,21 +81,34 @@ function extractDirective(ast: Module): "public" | "interactive" | null {
       item.type === "ExpressionStatement" &&
       item.expression.type === "StringLiteral"
     ) {
-      const value = item.expression.value;
-      if (value === "use public") return "public";
-      if (value === "use interactive") return "interactive";
-    }
-    if (
-      item.type !== "ExpressionStatement" ||
-      item.expression.type !== "StringLiteral"
-    ) {
+      const val = item.expression.value;
+      if (val === "use public") return "public";
+      if (val === "use interactive") return "interactive";
+    } else {
       break;
     }
   }
   return null;
 }
 
-function extractExports(ast: Module): SymbolInfo[] {
+function extractImports(
+  ast: Module
+): Array<{ path: string; specifiers: any[] }> {
+  const imports: Array<{ path: string; specifiers: any[] }> = [];
+  for (const item of ast.body) {
+    if (item.type === "ImportDeclaration") {
+      imports.push({ path: item.source.value, specifiers: item.specifiers });
+    }
+  }
+  return imports;
+}
+
+function extractExports(
+  ast: Module,
+  currentFile: string,
+  graph: DependencyGraph,
+  processFile: (fp: string) => void
+): SymbolInfo[] {
   const exports: SymbolInfo[] = [];
 
   for (const item of ast.body) {
@@ -133,10 +139,31 @@ function extractExports(ast: Module): SymbolInfo[] {
       }
     }
 
-    if (item.type === "ExportNamedDeclaration") {
-      for (const spec of item.specifiers) {
-        if (spec.type === "ExportSpecifier") {
-          exports.push({ name: spec.orig.value, kind: "unknown" });
+    if (item.type === "ExportNamedDeclaration" && item.source) {
+      const resolved = resolveFilePath(currentFile, item.source.value);
+      if (resolved) {
+        processFile(resolved);
+        const sourceExports = graph[resolved]?.exports || [];
+        for (const spec of item.specifiers) {
+          if (spec.type === "ExportSpecifier") {
+            const exp = sourceExports.find((e) => e.name === spec.orig.value);
+            exports.push({
+              name: spec.exported?.value || spec.orig.value,
+              kind: exp?.kind || "unknown",
+              decorators: exp?.decorators,
+            });
+          }
+        }
+      }
+    }
+
+    if (item.type === "ExportAllDeclaration") {
+      const resolved = resolveFilePath(currentFile, item.source.value);
+      if (resolved) {
+        processFile(resolved);
+        const sourceExports = graph[resolved]?.exports || [];
+        for (const exp of sourceExports) {
+          exports.push({ ...exp });
         }
       }
     }
@@ -159,8 +186,7 @@ function extractExports(ast: Module): SymbolInfo[] {
         name: "default",
         kind,
         isDefault: true,
-        decorators:
-          decorators && decorators.length > 0 ? decorators : undefined,
+        decorators: decorators?.length ? decorators : undefined,
       });
     }
 
@@ -172,36 +198,13 @@ function extractExports(ast: Module): SymbolInfo[] {
   return exports;
 }
 
-function extractImports(
-  ast: Module
-): Array<{ path: string; specifiers: any[] }> {
-  const imports: Array<{ path: string; specifiers: any[] }> = [];
-
-  for (const item of ast.body) {
-    if (item.type === "ImportDeclaration") {
-      imports.push({
-        path: item.source.value,
-        specifiers: item.specifiers,
-      });
-    }
-  }
-
-  return imports;
-}
-
 export function buildGraph(entryPoints: string[]): DependencyGraph {
   const graph: DependencyGraph = {};
   const visited = new Set<string>();
 
   function processFile(filePath: string): void {
-    const allowed =
-      filePath.endsWith(".ts") ||
-      filePath.endsWith(".tsx") ||
-      filePath.endsWith(".js") ||
-      filePath.endsWith(".jsx");
-
-    if (!allowed) return;
-
+    const allowedExt = [".ts", ".tsx", ".js", ".jsx"];
+    if (!allowedExt.includes(path.extname(filePath))) return;
     if (visited.has(filePath)) return;
     visited.add(filePath);
 
@@ -210,9 +213,11 @@ export function buildGraph(entryPoints: string[]): DependencyGraph {
       return;
     }
 
-    const isTsx = filePath.endsWith(".tsx") || filePath.endsWith(".jsx");
+    const isTsx = [".tsx", ".jsx"].includes(path.extname(filePath));
+    const store = Store.getInstance();
+    const newCode = store.get<string>(filePath);
+    const content = newCode ? newCode[0] : fs.readFileSync(filePath, "utf-8");
 
-    const content = fs.readFileSync(filePath, "utf-8");
     const ast = parseSync(content, {
       syntax: "typescript",
       tsx: isTsx,
@@ -220,72 +225,55 @@ export function buildGraph(entryPoints: string[]): DependencyGraph {
     });
 
     const directive = extractDirective(ast);
-    const exports = extractExports(ast);
     const rawImports = extractImports(ast);
+    const exports = extractExports(ast, filePath, graph, processFile);
 
     for (const { path: importPath } of rawImports) {
       const resolved = resolveFilePath(filePath, importPath);
-      if (resolved) {
-        processFile(resolved);
-      }
+      if (resolved) processFile(resolved);
     }
 
-    const imports: ImportInfo[] = [];
-    for (const { path: importPath, specifiers } of rawImports) {
-      const resolvedPath = resolveFilePath(filePath, importPath);
-      const sourceExports =
-        resolvedPath && graph[resolvedPath] ? graph[resolvedPath].exports : [];
-      const symbols: SymbolInfo[] = [];
+    const imports: ImportInfo[] = rawImports.map(
+      ({ path: importPath, specifiers }) => {
+        const resolvedPath = resolveFilePath(filePath, importPath);
+        const sourceExports =
+          resolvedPath && graph[resolvedPath]
+            ? graph[resolvedPath].exports
+            : [];
+        const symbols: SymbolInfo[] = [];
 
-      for (const spec of specifiers) {
-        if (spec.type === "ImportDefaultSpecifier") {
-          const defaultExport = sourceExports.find((e) => e.isDefault);
-          symbols.push({
-            name: spec.local.value,
-            kind: defaultExport?.kind || "unknown",
-            decorators: defaultExport?.decorators,
-            isDefault: true,
-          });
-        } else if (spec.type === "ImportNamespaceSpecifier") {
-          symbols.push({
-            name: spec.local.value,
-            kind: "namespace",
-          });
-        } else if (spec.type === "ImportSpecifier") {
-          const importedName = spec.imported
-            ? spec.imported.value
-            : spec.local.value;
-          const exportedSymbol = sourceExports.find(
-            (e) => e.name === importedName
-          );
-          symbols.push({
-            name: importedName,
-            kind: exportedSymbol?.kind || "unknown",
-            decorators: exportedSymbol?.decorators,
-          });
+        for (const spec of specifiers) {
+          if (spec.type === "ImportDefaultSpecifier") {
+            const def = sourceExports.find((e) => e.isDefault);
+            symbols.push({
+              name: spec.local.value,
+              kind: def?.kind || "unknown",
+              decorators: def?.decorators,
+              isDefault: true,
+            });
+          } else if (spec.type === "ImportNamespaceSpecifier") {
+            symbols.push({ name: spec.local.value, kind: "namespace" });
+          } else if (spec.type === "ImportSpecifier") {
+            const importedName = spec.imported
+              ? spec.imported.value
+              : spec.local.value;
+            const exp = sourceExports.find((e) => e.name === importedName);
+            symbols.push({
+              name: importedName,
+              kind: exp?.kind || "unknown",
+              decorators: exp?.decorators,
+            });
+          }
         }
+
+        return { sourcePath: importPath, resolvedPath, symbols };
       }
+    );
 
-      imports.push({
-        sourcePath: importPath,
-        resolvedPath,
-        symbols,
-      });
-    }
-
-    graph[filePath] = {
-      filePath,
-      isTsx,
-      directive,
-      imports,
-      exports,
-    };
+    graph[filePath] = { filePath, isTsx, directive, imports, exports };
   }
 
-  for (const entry of entryPoints) {
-    const resolved = path.resolve(entry);
-    processFile(resolved);
-  }
+  for (const entry of entryPoints) processFile(path.resolve(entry));
 
   return graph;
 }

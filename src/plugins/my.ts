@@ -10,6 +10,7 @@ import { generateServerStub } from "./generators/tsx_server_stub";
 import { j2d } from "./transformers/j2d";
 import { generateServerComponent } from "./generators/generate_server_component";
 import { generateRscStub } from "./generators/generate_rsc";
+import { Store } from "@/store";
 
 interface MyPluginParams {
   isServerBuild: boolean;
@@ -123,6 +124,7 @@ class ServerBuildTransformer {
     path: string
   ): Promise<OnLoadResult> {
     const stubSource = generateServerStub(path, source);
+
     return swcTransform(stubSource, path);
   }
 
@@ -139,7 +141,13 @@ class ServerBuildTransformer {
     if (isTsx) {
       if (isInteractiveFile) {
         onClientFound(path);
-        return this.transformInteractiveTsxStub(source, path);
+        const clientCode = await this.transformInteractiveTsxStub(source, path);
+
+        const store = Store.getInstance();
+
+        store.set(path, clientCode.contents);
+
+        return clientCode;
       }
       return this.transformServerTsx(source, path);
     }
@@ -260,10 +268,10 @@ export function useMyPlugin(options: MyPluginParams): Plugin {
           }
 
           const node = options.graph[args.path];
+
           if (!node) {
-            throw new Error(
-              `File node not found in dependency graph: ${args.path}`
-            );
+            console.log(`File node not found in depend graph: ${args.path}`);
+            throw new Error("900");
           }
 
           return clientTransformer.process(node, metadata);

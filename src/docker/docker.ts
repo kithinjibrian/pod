@@ -36,6 +36,10 @@ export async function dockerize(env: "dev" | "prod" = "prod") {
     await setupDevelopment(cwd, projectName, selectedServices);
   }
 
+  await createDeployfile(cwd, projectName);
+
+  await writeEnvVars(cwd, selectedServices, env);
+
   printNextSteps(projectName, env, selectedServices);
 }
 
@@ -67,7 +71,7 @@ async function selectServices(
     })),
   });
 
-  if (!response.services) return [];
+  if (!response.services || response.services.length === 0) return [];
   return detected.filter((s) => response.services.includes(s.name));
 }
 
@@ -98,24 +102,269 @@ async function restructureProject(cwd: string, projectName: string) {
   }
 }
 
+async function writeEnvVars(
+  cwd: string,
+  services: DockerService[],
+  env: string
+) {
+  const envPath = path.join(cwd, ".env");
+  let existingEnv: Record<string, string> = {};
+  let existingContent = "";
+
+  if (fs.existsSync(envPath)) {
+    existingContent = await fs.readFile(envPath, "utf8");
+    existingEnv = parseEnvFile(existingContent);
+  }
+
+  const newVars: string[] = [];
+
+  if (env === "prod" && !existingEnv.HOST) {
+    newVars.push("HOST=example.com");
+  }
+
+  for (const service of services) {
+    const serviceVars = getEnvVars(service.name);
+    for (const varLine of serviceVars) {
+      const [key] = varLine.split("=");
+      if (!existingEnv[key]) {
+        newVars.push(varLine);
+      }
+    }
+
+    if (env === "dev" && service.needsTunnel) {
+      const remoteHostKey = `${service.name.toUpperCase()}_REMOTE_HOST`;
+      const remotePortKey = `${service.name.toUpperCase()}_REMOTE_PORT`;
+
+      if (!existingEnv[remoteHostKey]) {
+        newVars.push(`${remoteHostKey}=user@remote-server.com`);
+      }
+      if (!existingEnv[remotePortKey]) {
+        newVars.push(`${remotePortKey}=${getDefaultPort(service.name)}`);
+      }
+    }
+  }
+
+  if (newVars.length > 0) {
+    const separator =
+      existingContent && !existingContent.endsWith("\n") ? "\n" : "";
+    const newContent =
+      existingContent +
+      separator +
+      (existingContent ? "\n" : "") +
+      newVars.join("\n") +
+      "\n";
+    await fs.writeFile(envPath, newContent);
+    console.log(
+      `✅ Added ${newVars.length} new environment variable(s) to .env`
+    );
+  } else {
+    console.log("✅ All required environment variables already exist in .env");
+  }
+}
+
+function parseEnvFile(content: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  const lines = content.split("\n");
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const equalIndex = trimmed.indexOf("=");
+    if (equalIndex > 0) {
+      const key = trimmed.substring(0, equalIndex).trim();
+      const value = trimmed.substring(equalIndex + 1).trim();
+      env[key] = value;
+    }
+  }
+
+  return env;
+}
+
 async function createDockerfile(cwd: string, projectName: string) {
   const dockerfilePath = path.join(cwd, projectName, "Dockerfile");
+  const dockerignorePath = path.join(cwd, projectName, ".dockerignore");
 
   const dockerfile = `FROM node:18-alpine
 
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --only=production
+
+RUN npm install
 
 COPY . .
-RUN if [ -f "tsconfig.json" ]; then npm run build || true; fi
 
-EXPOSE 3000
-CMD ["npm", "start"]
+EXPOSE 8080
+
+CMD ["npm", "run", "dev"]
+`;
+
+  const dockerignore = `# Dependencies
+node_modules
+npm-debug.log
+yarn-error.log
+package-lock.json
+yarn.lock
+
+# Environment files
+.env
+.env.*
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage
+.nyc_output
+*.test.js
+*.spec.js
+__tests__
+
+# Build files
+dist
+public
+
+# Logs
+logs
+*.log
+
+# Documentation
+README.md
+docs
+*.md
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Misc
+.cache
+tmp
+temp
 `;
 
   await fs.writeFile(dockerfilePath, dockerfile);
+  await fs.writeFile(dockerignorePath, dockerignore);
+}
+
+async function createDeployfile(cwd: string, projectName: string) {
+  const deployFile = `name: ${projectName}
+version: 1.0.0
+
+targets:
+  ec2:
+    host: ec2-xx-xx-xxx-xxx.xx-xxxx-x.compute.amazonaws.com
+    user: ubuntu
+    keyPath: ~/xxxx.pem
+    port: 22
+    deployPath: /home/\${ubuntu}/app
+
+    operations:
+      - name: "Setup swap space"
+        type: ensure
+        ensure:
+          swap:
+            size: 4G
+
+      - name: "Install Docker"
+        type: ensure
+        ensure:
+          docker:
+            version: "28.5.2"
+            addUserToGroup: true
+
+      - name: "Create application directories"
+        type: ensure
+        ensure:
+          directory:
+            path: \${deployPath}
+            owner: \${user}
+
+      - name: "Create backup directory"
+        type: ensure
+        ensure:
+          directory:
+            path: /home/\${ubuntu}/backups
+            owner: \${user}
+
+      - name: "Stop running containers"
+        type: action
+        action:
+          command: cd \${deployPath} && docker compose down 2>/dev/null || true
+
+      - name: "Sync application files"
+        type: action
+        action:
+          rsync:
+            source: ./
+            destination: \${deployPath}/
+            exclude:
+              - node_modules/
+              - .git/
+              - "*.log"
+              - .env.local
+              - dist/
+              - public/
+
+      - name: "Pull Docker images"
+        type: action
+        action:
+          command: cd \${deployPath} && docker compose pull
+
+      - name: "Build and start containers"
+        type: action
+        action:
+          command: cd \${deployPath} && docker compose up -d --build --remove-orphans
+
+      - name: "Wait for services to start"
+        type: action
+        action:
+          command: sleep 10
+
+      - name: "Show container status"
+        type: action
+        action:
+          command: cd \${deployPath} && docker compose ps
+
+      - name: "Show recent logs"
+        type: action
+        action:
+          command: cd \${deployPath} && docker compose logs --tail=30
+
+      - name: "Cleanup old backups"
+        type: action
+        action:
+          command: find /home/\${ubuntu}/backups -name "backup-*.tar.gz" -mtime +7 -delete
+
+      - name: "Cleanup Docker resources"
+        type: action
+        action:
+          command: docker system prune -f --volumes
+
+      - name: "Verify containers are running"
+        type: verify
+        verify:
+          command: cd \${deployPath} && docker compose ps | grep -q "Up"
+`;
+
+  const deployFilePath = path.join(cwd, "pod.deploy.yml");
+
+  await fs.writeFile(deployFilePath, deployFile);
 }
 
 async function setupProduction(
@@ -137,25 +386,42 @@ async function setupProduction(
           "--certificatesresolvers.myresolver.acme.email=admin@example.com",
           "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json",
         ],
-        ports: ["80:80", "443:443", "8080:8080"],
+        labels: [
+          "traefik.enable=true",
+          "traefik.http.routers.http-catchall.rule=HostRegexp(`{host:.+}`)",
+          "traefik.http.routers.http-catchall.entrypoints=web",
+          "traefik.http.routers.http-catchall.middlewares=redirect-to-https",
+          "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https",
+          "traefik.http.routers.dashboard.rule=Host(`traefik.${HOST}`)",
+          "traefik.http.routers.dashboard.entrypoints=websecure",
+          "traefik.http.routers.dashboard.tls.certresolver=myresolver",
+          "traefik.http.routers.dashboard.service=api@internal",
+        ],
+        ports: ["80:80", "443:443"],
         volumes: [
           "/var/run/docker.sock:/var/run/docker.sock:ro",
           "./letsencrypt:/letsencrypt",
         ],
         networks: ["web"],
+        env_file: [".env"],
       },
       [projectName]: {
-        build: ".",
+        build: {
+          context: `./${projectName}`,
+          dockerfile: "Dockerfile",
+        },
         labels: [
           "traefik.enable=true",
-          "traefik.http.routers.app.rule=Host(`localhost`)",
+          "traefik.http.routers.app.rule=Host(`app.${HOST}`)",
           "traefik.http.routers.app.entrypoints=websecure",
           "traefik.http.routers.app.tls.certresolver=myresolver",
-          "traefik.http.services.app.loadbalancer.server.port=3000",
+          "traefik.http.services.app.loadbalancer.server.port=8080",
         ],
         env_file: [".env"],
-        depends_on: [],
         networks: ["web"],
+        volumes: [`./${projectName}:/app`, `/app/node_modules`],
+        command: "npm run dev",
+        depends_on: [],
       },
     },
     networks: {
@@ -180,7 +446,6 @@ async function setupProduction(
     composePath,
     yaml.dump(compose, { indent: 2, lineWidth: -1 })
   );
-  await createEnvTemplate(cwd, services, "prod");
 }
 
 async function setupDevelopment(
@@ -223,7 +488,7 @@ async function setupDevelopment(
         })),
       });
 
-      if (selected) {
+      if (selected && selected.length > 0) {
         servicesToTunnel.push(
           ...existingServices
             .filter((s) => selected.includes(s.name))
@@ -240,10 +505,13 @@ async function setupDevelopment(
   const compose: any = {
     services: {
       [projectName]: {
-        build: ".",
-        ports: ["3000:3000"],
+        build: {
+          context: `./${projectName}`,
+          dockerfile: "Dockerfile",
+        },
+        ports: ["8080:8080"],
         env_file: [".env"],
-        volumes: [".:/app", "/app/node_modules"],
+        volumes: [`./${projectName}:/app`, `/app/node_modules`],
         command: "npm run dev",
         depends_on: [],
       },
@@ -276,7 +544,6 @@ async function setupDevelopment(
     devComposePath,
     yaml.dump(compose, { indent: 2, lineWidth: -1 })
   );
-  await createEnvTemplate(cwd, services, "dev");
 }
 
 async function createTunnelService(projectDir: string, serviceName: string) {
@@ -314,28 +581,6 @@ ssh -i $SSH_KEY \\
 
   await fs.writeFile(path.join(tunnelDir, "Dockerfile"), dockerfile);
   await fs.writeFile(path.join(tunnelDir, "tunnel.sh"), tunnelScript);
-}
-
-async function createEnvTemplate(
-  projectDir: string,
-  services: DockerService[],
-  env: "dev" | "prod"
-) {
-  const envPath = path.join(projectDir, ".env.example");
-
-  let content = `NODE_ENV=${
-    env === "prod" ? "production" : "development"
-  }\nPORT=3000\n`;
-
-  if (services.length > 0) {
-    content += `\n`;
-    for (const service of services) {
-      const vars = getEnvVars(service.name);
-      content += vars.join("\n") + "\n\n";
-    }
-  }
-
-  await fs.writeFile(envPath, content);
 }
 
 function getServiceConfig(serviceName: string) {
@@ -439,11 +684,11 @@ function printNextSteps(
   console.log(`\n✅ Done! Next steps:\n`);
 
   if (env === "prod") {
-    console.log(`  # Edit .env with your settings`);
+    console.log(`  # Review and edit .env with your settings`);
     console.log(`  docker-compose up -d`);
-    console.log(`  # Access at https://localhost\n`);
+    console.log(`  # Access at https://app.\${HOST}\n`);
   } else {
-    console.log(`  # Edit .env with your settings`);
+    console.log(`  # Review and edit .env with your settings`);
     if (services.some((s) => s.needsTunnel)) {
       console.log(`  # Add SSH keys: {service}.pem`);
     }

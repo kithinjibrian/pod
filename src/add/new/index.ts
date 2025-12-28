@@ -19,6 +19,15 @@ export function addNew(name: string) {
       {
         name: "src",
         files: [{ name: "main.ts", content: genMainTs() }],
+        dirs: [
+          {
+            name: "client",
+            files: [
+              { name: "index.html", content: genIndexHtml(name) },
+              { name: "client.tsx", content: genClientTsx() },
+            ],
+          },
+        ],
       },
     ],
   };
@@ -27,7 +36,7 @@ export function addNew(name: string) {
 
   const appDir = path.join(process.cwd(), name, "src", "app");
 
-  addModule("app", appDir);
+  addModule("app", appDir, true);
 
   process.chdir(baseDir);
 
@@ -51,6 +60,7 @@ function genPackageJson(name: string) {
       "reflect-metadata": "latest",
       zod: "^4.2.1",
       "@kithinji/orca": "latest",
+      "@kithinji/arcane": "latest",
     },
     devDependencies: {
       "@types/node": "^20.19.27",
@@ -115,7 +125,60 @@ build
 }
 
 function genEnv() {
-  return `NODE_ENV=development
+  return `host=localhost
+`;
+}
+
+function genIndexHtml(name: string) {
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${name} app</title>
+    <link rel="stylesheet" href="index.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/client/client.js"></script>
+  </body>
+</html>
+`;
+}
+
+function genClientTsx() {
+  return `"use interactive";
+
+import {
+  Module,
+  BrowserFactory,
+  Component,
+  RouterModule,
+  RouterOutlet,
+  HttpClientModule,
+} from "@kithinji/orca";
+
+@Component({
+  deps: [RouterOutlet],
+})
+class AppComponent {
+  build() {
+    return <RouterOutlet />;
+  }
+}
+
+@Module({
+  imports: [RouterModule.forRoot(), HttpClientModule],
+  declarations: [AppComponent],
+  bootstrap: AppComponent,
+})
+class AppModule {}
+
+export function bootstrap() {
+  BrowserFactory.create(AppModule, document.getElementById("root")!);
+}
+
+bootstrap();
 `;
 }
 

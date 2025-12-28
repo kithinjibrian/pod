@@ -25,10 +25,12 @@ import { addFeature } from "./add/module";
 import path from "path";
 import { execSync } from "child_process";
 import { dockerize } from "./docker";
+import { deploy } from "./deploy";
+import chalk from "chalk";
 
 const program = new Command();
 
-program.name("pod").description("Pod cli tool").version("0.0.0");
+program.name("pod").description("Pod cli tool").version("1.0.21");
 
 program
   .command("new <name>")
@@ -38,11 +40,16 @@ program
 
     const appDir = path.resolve(process.cwd(), name);
 
+    const shell =
+      process.platform === "win32"
+        ? process.env.ComSpec || "cmd.exe"
+        : "/bin/sh";
+
     console.log("Installing dependencies...");
-    execSync("npm install", { stdio: "inherit", cwd: appDir });
+    execSync("npm install", { stdio: "inherit", cwd: appDir, shell });
 
     console.log("Starting development server...");
-    execSync("npm run dev", { stdio: "inherit", cwd: appDir });
+    execSync("npm run dev", { stdio: "inherit", cwd: appDir, shell });
 
     console.log(`All done! Your app "${name}" is running in development mode.`);
   });
@@ -83,12 +90,16 @@ program
   });
 
 program
-  .command("deploy <type> <options>")
-  .description("Deploy a Pod Project")
-  .action(async (type, name) => {
+  .command("deploy")
+  .description("Deploy to a target environment")
+  .argument("<target>", "Target environment (e.g., ec2)")
+  .option("--force-install", "Force reinstallation even if already installed")
+  .action(async (target: string, options: { forceEnsure?: boolean }) => {
     try {
-    } catch (err: any) {
-      console.error("❌ Error:", err.message);
+      await deploy(target, options);
+    } catch (error: any) {
+      console.error(chalk.red(error.message));
+      process.exit(1);
     }
   });
 

@@ -1,5 +1,10 @@
-import { parseSync } from "@swc/core";
-import type { ClassDeclaration, Decorator } from "@swc/core";
+import { parseSync, printSync } from "@swc/core";
+import type {
+  ClassDeclaration,
+  Decorator,
+  ImportDeclaration,
+  ModuleItem,
+} from "@swc/core";
 
 interface MethodParam {
   name: string;
@@ -13,9 +18,16 @@ interface ComponentMethod {
   isAsync: boolean;
 }
 
-interface ComponentInfo {
-  className: string;
+interface ClassStub {
+  name: string;
+  propsType: string;
+  decorators: string[];
+  constructorParams: string[];
   methods: ComponentMethod[];
+}
+
+interface ImportMap {
+  [localName: string]: string;
 }
 
 export function generateServerComponent(
@@ -28,39 +40,68 @@ export function generateServerComponent(
     decorators: true,
   });
 
-  const componentInfo = extractComponentInfo(ast);
-
-  return generateStubCode(componentInfo);
-}
-
-function extractComponentInfo(ast: any): ComponentInfo {
-  let componentClass: ClassDeclaration | null = null;
-
+  const importMap: ImportMap = {};
   for (const item of ast.body) {
-    if (
-      item.type === "ExportDeclaration" &&
-      item.declaration.type === "ClassDeclaration"
-    ) {
-      const classDecl = item.declaration as ClassDeclaration;
-
-      if (hasComponentDecorator(classDecl.decorators)) {
-        componentClass = classDecl;
-        break;
+    if (item.type === "ImportDeclaration") {
+      const decl = item as ImportDeclaration;
+      for (const specifier of decl.specifiers ?? []) {
+        let localName: string;
+        if (specifier.type === "ImportSpecifier") {
+          localName = specifier.local.value;
+        } else if (specifier.type === "ImportDefaultSpecifier") {
+          localName = specifier.local.value;
+        } else {
+          continue;
+        }
+        importMap[localName] = decl.source.value;
       }
     }
   }
 
-  if (!componentClass || !componentClass.identifier) {
-    throw new Error("Component class is undefined");
+  const preservedNodes: ModuleItem[] = [];
+  const stubbedClasses: ClassStub[] = [];
+
+  for (const item of ast.body) {
+    let shouldStub = false;
+
+    if (
+      item.type === "ExportDeclaration" &&
+      item.declaration?.type === "ClassDeclaration"
+    ) {
+      const classDecl = item.declaration as ClassDeclaration;
+
+      if (hasComponentDecorator(classDecl.decorators)) {
+        shouldStub = true;
+        const stub = extractClassStub(classDecl);
+        if (stub) {
+          stubbedClasses.push(stub);
+        }
+      }
+    }
+
+    if (!shouldStub) {
+      preservedNodes.push(item);
+    }
   }
 
-  const className = componentClass.identifier.value;
-  const methods = extractMethods(componentClass);
+  const preservedCode =
+    preservedNodes.length > 0
+      ? printSync({
+          type: "Module",
+          span: ast.span,
+          body: preservedNodes,
+          interpreter: ast.interpreter,
+        }).code
+      : "";
 
-  return {
-    className,
-    methods,
-  };
+  const stubCode = stubbedClasses
+    .map((stub) => generateStubCode(stub))
+    .join("\n\n");
+
+  return `
+${preservedCode}
+${stubCode}
+  `.trim();
 }
 
 function hasComponentDecorator(decorators?: Decorator[]): boolean {
@@ -84,6 +125,136 @@ function hasComponentDecorator(decorators?: Decorator[]): boolean {
 
     return false;
   });
+}
+
+function extractClassStub(classDecl: ClassDeclaration): ClassStub | null {
+  const className = classDecl.identifier?.value;
+  if (!className) return null;
+
+  let propsType = "{}";
+  const decorators: string[] = [];
+  const constructorParams: string[] = [];
+
+  if (classDecl.decorators) {
+    for (const dec of classDecl.decorators) {
+      const str = stringifyDecorator(dec);
+      if (str) decorators.push(str);
+    }
+  }
+
+  for (const member of classDecl.body) {
+    if (member.type === "ClassProperty") {
+      if (member.key.type === "Identifier" && member.key.value === "props") {
+        propsType = extractPropsType(member);
+      }
+    } else if (member.type === "Constructor") {
+      for (const param of member.params) {
+        const paramStr = stringifyParam(param);
+        if (paramStr) constructorParams.push(paramStr);
+      }
+    }
+  }
+
+  const methods = extractMethods(classDecl);
+
+  return {
+    name: className,
+    propsType,
+    decorators,
+    constructorParams,
+    methods,
+  };
+}
+
+export function stringifyDecorator(decorator: Decorator): string {
+  const exprCode = printSync({
+    type: "Module",
+    span: { start: 0, end: 0, ctxt: 0 },
+    body: [
+      {
+        type: "ExpressionStatement",
+        expression: decorator.expression,
+        span: { start: 0, end: 0, ctxt: 0 },
+      },
+    ],
+    interpreter: "",
+  }).code;
+
+  const cleanCode = exprCode.replace(/^#!.*\n/, "").trim();
+
+  return `@${cleanCode.replace(/;$/, "")}`;
+}
+
+function extractPropsType(member: any): string {
+  const typeAnn = member.typeAnnotation?.typeAnnotation;
+  if (!typeAnn) return "{}";
+
+  if (typeAnn.type === "TsTypeLiteral") {
+    const props: string[] = [];
+    for (const m of typeAnn.members) {
+      if (m.type === "TsPropertySignature") {
+        const key = m.key.type === "Identifier" ? m.key.value : "?";
+        const t = m.typeAnnotation
+          ? stringifyType(m.typeAnnotation.typeAnnotation)
+          : "any";
+        props.push(`${key}: ${t}`);
+      }
+    }
+    return `{ ${props.join("; ")} }`;
+  }
+
+  return stringifyType(typeAnn);
+}
+
+function stringifyParam(param: any): string {
+  let decorators: string[] = [];
+  if (param.decorators) {
+    for (const d of param.decorators) {
+      const str = stringifyDecorator(d);
+      if (str) decorators.push(str);
+    }
+  }
+  const decoratorPrefix = decorators.length ? decorators.join(" ") + " " : "";
+
+  let typeName = "any";
+  let paramName = "";
+  let accessibility = "";
+
+  if (param.type === "TsParameterProperty") {
+    accessibility = param.accessibility || "";
+    const inner = param.param;
+    if (inner.type !== "Identifier") return "";
+
+    paramName = inner.value;
+    if (inner.typeAnnotation?.typeAnnotation) {
+      typeName = extractTypeName(inner.typeAnnotation.typeAnnotation);
+    }
+  } else if (param.type === "Parameter") {
+    const pat = param.pat;
+    if (pat.type !== "Identifier") return "";
+
+    paramName = pat.value;
+    if (pat.typeAnnotation?.typeAnnotation) {
+      typeName = extractTypeName(pat.typeAnnotation.typeAnnotation);
+    }
+  } else {
+    return "";
+  }
+
+  const accessPrefix = accessibility ? `${accessibility} ` : "";
+  const result = `${decoratorPrefix}${accessPrefix}${paramName}: ${typeName}`;
+
+  return result;
+}
+
+function extractTypeName(typeNode: any): string {
+  if (
+    typeNode.type === "TsTypeReference" &&
+    typeNode.typeName.type === "Identifier"
+  ) {
+    return typeNode.typeName.value;
+  }
+  return stringifyType(typeNode);
 }
 
 function extractMethods(classDecl: ClassDeclaration): ComponentMethod[] {
@@ -209,32 +380,36 @@ function stringifyType(typeNode: any): string {
   }
 }
 
-function generateStubCode(componentInfo: ComponentInfo): string {
-  const className = componentInfo.className;
+function generateStubCode(stub: ClassStub): string {
+  const className = stub.name;
 
-  const build = componentInfo.methods.find((p) => p.name == "build");
+  const build = stub.methods.find((p) => p.name == "build");
 
   if (build == undefined) {
     throw new Error("Component has no build function");
   }
 
+  const decoratorsStr =
+    stub.decorators.length > 0 ? stub.decorators.join("\n") + "\n" : "";
+
   return `import { 
-  Component, 
-  Inject, 
-  getCurrentInjector, 
-  OrcaComponent,
-  JSX,
-  OSC,
-  HttpClient,
+  Inject as _Inject, 
+  getCurrentInjector as _getCurrentInjector, 
+  OrcaComponent as _OrcaComponent,
+  JSX as _JSX,
+  OSC as _OSC,
+  HttpClient as _HttpClient,
+  symbolValueReviver as _symbolValueReviver
 } from "@kithinji/orca";
 
-@Component()
-export class ${className} extends OrcaComponent {
+
+${decoratorsStr}export class ${className} extends _OrcaComponent {
     props!: any;
 
     constructor(
-      @Inject("OSC_URL", { maybe: true }) private oscUrl?: string,
-      private readonly http: HttpClient,
+      @_Inject("OSC_URL", { maybe: true }) private oscUrl?: string,
+      private readonly http: _HttpClient,
+      ${stub.constructorParams.join(", ")}
     ) {
       super();
 
@@ -247,19 +422,20 @@ export class ${className} extends OrcaComponent {
         const root = document.createElement("div");
         root.textContent = "loading...";
 
-        const injector = getCurrentInjector();
+        const injector = _getCurrentInjector();
 
         if(injector == null) {
           throw new Error("Injector is null");
         }
 
-        const osc = new OSC(root);
+        const osc = new _OSC(root);
 
-        const subscription = this.http.post<JSX.Element>(
+        const subscription = this.http.post<_JSX.Element>(
           \`\${this.oscUrl}?c=${className}\`, {
-            body: this.props
+            body: this.props,
+            reviver: _symbolValueReviver,
           }
-        ).subscribe((jsx: JSX.Element) => {
+        ).subscribe((jsx: _JSX.Element) => {
           const action = jsx.action || "insert";
 
           if (action === "insert") {

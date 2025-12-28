@@ -14,6 +14,8 @@ export interface MacroContext {
   get program(): ts.Program;
   get checker(): ts.TypeChecker;
   error(msg: string): never;
+  resolveNodeValue(node: ts.Node): any;
+  resolveIdentifier(identifier: ts.Identifier): ts.Node;
 }
 
 interface MacroNode {
@@ -23,7 +25,6 @@ interface MacroNode {
   sourceFile: ts.SourceFile;
   filePath: string;
   dependencies: Set<string>;
-  value: any;
   astResult?: ts.Node;
   computed: boolean;
 }
@@ -61,7 +62,7 @@ class MacroDependencyGraph {
         sourceFile,
         filePath: sourceFile.fileName,
         dependencies: new Set(),
-        value: undefined,
+        astResult: undefined,
         computed: false,
       });
     }
@@ -78,17 +79,16 @@ class MacroDependencyGraph {
     }
   }
 
-  setValue(key: string, value: any, astResult: ts.Node) {
+  setResult(key: string, astResult: ts.Node) {
     const node = this.nodes.get(key);
     if (node) {
-      node.value = value;
       node.computed = true;
       node.astResult = astResult;
     }
   }
 
-  getValue(key: string): any {
-    return this.nodes.get(key)?.value;
+  getResult(key: string): ts.Node | undefined {
+    return this.nodes.get(key)?.astResult;
   }
 
   isComputed(key: string): boolean {
@@ -254,7 +254,149 @@ function findVariableDeclarationInFile(
   return found;
 }
 
-function createEvaluator(
+export function extractValueFromNode(node: ts.Node): any | undefined {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return node.text;
+  }
+  if (ts.isNumericLiteral(node)) return Number(node.text);
+  if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
+  if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
+  if (node.kind === ts.SyntaxKind.NullKeyword) return null;
+  if (node.kind === ts.SyntaxKind.UndefinedKeyword) return undefined;
+
+  if (ts.isTemplateExpression(node)) {
+    let result = node.head.text;
+    for (const span of node.templateSpans) {
+      const exprValue = extractValueFromNode(span.expression);
+      result += String(exprValue) + span.literal.text;
+    }
+    return result;
+  }
+
+  if (ts.isObjectLiteralExpression(node)) {
+    const obj: any = {};
+    for (const prop of node.properties) {
+      if (ts.isPropertyAssignment(prop)) {
+        const key = ts.isIdentifier(prop.name)
+          ? prop.name.text
+          : ts.isStringLiteral(prop.name)
+          ? prop.name.text
+          : ts.isNumericLiteral(prop.name)
+          ? prop.name.text
+          : ts.isComputedPropertyName(prop.name)
+          ? extractValueFromNode(prop.name.expression)
+          : undefined;
+
+        if (key !== undefined) {
+          obj[key] = extractValueFromNode(prop.initializer);
+        }
+      } else if (ts.isShorthandPropertyAssignment(prop)) {
+        obj[prop.name.text] = prop.name.text;
+      } else if (ts.isSpreadAssignment(prop)) {
+        const spread = extractValueFromNode(prop.expression);
+        if (typeof spread === "object" && spread !== null) {
+          Object.assign(obj, spread);
+        }
+      }
+    }
+    return obj;
+  }
+
+  if (ts.isArrayLiteralExpression(node)) {
+    return node.elements
+      .map((el) => {
+        if (ts.isSpreadElement(el)) {
+          const spread = extractValueFromNode(el.expression);
+          return Array.isArray(spread) ? spread : [spread];
+        }
+        return extractValueFromNode(el);
+      })
+      .flat();
+  }
+
+  if (ts.isPrefixUnaryExpression(node)) {
+    const operand = extractValueFromNode(node.operand);
+    switch (node.operator) {
+      case ts.SyntaxKind.MinusToken:
+        return -operand;
+      case ts.SyntaxKind.PlusToken:
+        return +operand;
+      case ts.SyntaxKind.ExclamationToken:
+        return !operand;
+      case ts.SyntaxKind.TildeToken:
+        return ~operand;
+    }
+  }
+
+  if (ts.isBinaryExpression(node)) {
+    const left = extractValueFromNode(node.left);
+    const right = extractValueFromNode(node.right);
+
+    switch (node.operatorToken.kind) {
+      case ts.SyntaxKind.PlusToken:
+        return left + right;
+      case ts.SyntaxKind.MinusToken:
+        return left - right;
+      case ts.SyntaxKind.AsteriskToken:
+        return left * right;
+      case ts.SyntaxKind.SlashToken:
+        return left / right;
+      case ts.SyntaxKind.PercentToken:
+        return left % right;
+      case ts.SyntaxKind.AsteriskAsteriskToken:
+        return left ** right;
+      case ts.SyntaxKind.EqualsEqualsToken:
+        return left == right;
+      case ts.SyntaxKind.EqualsEqualsEqualsToken:
+        return left === right;
+      case ts.SyntaxKind.ExclamationEqualsToken:
+        return left != right;
+      case ts.SyntaxKind.ExclamationEqualsEqualsToken:
+        return left !== right;
+      case ts.SyntaxKind.LessThanToken:
+        return left < right;
+      case ts.SyntaxKind.LessThanEqualsToken:
+        return left <= right;
+      case ts.SyntaxKind.GreaterThanToken:
+        return left > right;
+      case ts.SyntaxKind.GreaterThanEqualsToken:
+        return left >= right;
+      case ts.SyntaxKind.AmpersandAmpersandToken:
+        return left && right;
+      case ts.SyntaxKind.BarBarToken:
+        return left || right;
+      case ts.SyntaxKind.QuestionQuestionToken:
+        return left ?? right;
+    }
+  }
+
+  if (ts.isParenthesizedExpression(node)) {
+    return extractValueFromNode(node.expression);
+  }
+
+  if (ts.isConditionalExpression(node)) {
+    const condition = extractValueFromNode(node.condition);
+    return condition
+      ? extractValueFromNode(node.whenTrue)
+      : extractValueFromNode(node.whenFalse);
+  }
+
+  if (ts.isPropertyAccessExpression(node)) {
+    const obj = extractValueFromNode(node.expression);
+    const propName = node.name.text;
+    return obj?.[propName];
+  }
+
+  if (ts.isElementAccessExpression(node)) {
+    const obj = extractValueFromNode(node.expression);
+    const index = extractValueFromNode(node.argumentExpression);
+    return obj?.[index];
+  }
+
+  return undefined;
+}
+
+function createNodeResolver(
   graph: MacroDependencyGraph,
   currentFileKey: string,
   sourceFile: ts.SourceFile,
@@ -262,156 +404,10 @@ function createEvaluator(
 ) {
   const trackedDependencies: string[] = [];
 
-  function evaluateArgumentValue(arg: ts.Expression): any {
-    if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) {
-      return arg.text;
-    }
-    if (ts.isNumericLiteral(arg)) {
-      return Number(arg.text);
-    }
-    if (arg.kind === ts.SyntaxKind.TrueKeyword) return true;
-    if (arg.kind === ts.SyntaxKind.FalseKeyword) return false;
-    if (arg.kind === ts.SyntaxKind.NullKeyword) return null;
-    if (arg.kind === ts.SyntaxKind.UndefinedKeyword) return undefined;
-
-    if (ts.isTemplateExpression(arg)) {
-      let result = arg.head.text;
-      for (const span of arg.templateSpans) {
-        const exprValue = evaluateArgumentValue(span.expression);
-        result += String(exprValue) + span.literal.text;
-      }
-      return result;
-    }
-
-    if (ts.isObjectLiteralExpression(arg)) {
-      const obj: any = {};
-      for (const prop of arg.properties) {
-        if (ts.isPropertyAssignment(prop)) {
-          const key = ts.isIdentifier(prop.name)
-            ? prop.name.text
-            : ts.isStringLiteral(prop.name)
-            ? prop.name.text
-            : ts.isNumericLiteral(prop.name)
-            ? prop.name.text
-            : ts.isComputedPropertyName(prop.name)
-            ? evaluateArgumentValue(prop.name.expression)
-            : undefined;
-
-          if (key !== undefined) {
-            obj[key] = evaluateArgumentValue(prop.initializer);
-          }
-        } else if (ts.isShorthandPropertyAssignment(prop)) {
-          const name = prop.name.text;
-          obj[name] = resolveIdentifier(prop.name);
-        } else if (ts.isSpreadAssignment(prop)) {
-          const spread = evaluateArgumentValue(prop.expression);
-          Object.assign(obj, spread);
-        }
-      }
-      return obj;
-    }
-
-    if (ts.isArrayLiteralExpression(arg)) {
-      return arg.elements
-        .map((el) => {
-          if (ts.isSpreadElement(el)) {
-            const spread = evaluateArgumentValue(el.expression);
-            return Array.isArray(spread) ? spread : [spread];
-          }
-          return evaluateArgumentValue(el);
-        })
-        .flat();
-    }
-
-    if (ts.isPrefixUnaryExpression(arg)) {
-      const operand = evaluateArgumentValue(arg.operand);
-      switch (arg.operator) {
-        case ts.SyntaxKind.MinusToken:
-          return -operand;
-        case ts.SyntaxKind.PlusToken:
-          return +operand;
-        case ts.SyntaxKind.ExclamationToken:
-          return !operand;
-        case ts.SyntaxKind.TildeToken:
-          return ~operand;
-      }
-    }
-
-    if (ts.isBinaryExpression(arg)) {
-      const left = evaluateArgumentValue(arg.left);
-      const right = evaluateArgumentValue(arg.right);
-
-      switch (arg.operatorToken.kind) {
-        case ts.SyntaxKind.PlusToken:
-          return left + right;
-        case ts.SyntaxKind.MinusToken:
-          return left - right;
-        case ts.SyntaxKind.AsteriskToken:
-          return left * right;
-        case ts.SyntaxKind.SlashToken:
-          return left / right;
-        case ts.SyntaxKind.PercentToken:
-          return left % right;
-        case ts.SyntaxKind.AsteriskAsteriskToken:
-          return left ** right;
-        case ts.SyntaxKind.EqualsEqualsToken:
-          return left == right;
-        case ts.SyntaxKind.EqualsEqualsEqualsToken:
-          return left === right;
-        case ts.SyntaxKind.ExclamationEqualsToken:
-          return left != right;
-        case ts.SyntaxKind.ExclamationEqualsEqualsToken:
-          return left !== right;
-        case ts.SyntaxKind.LessThanToken:
-          return left < right;
-        case ts.SyntaxKind.LessThanEqualsToken:
-          return left <= right;
-        case ts.SyntaxKind.GreaterThanToken:
-          return left > right;
-        case ts.SyntaxKind.GreaterThanEqualsToken:
-          return left >= right;
-        case ts.SyntaxKind.AmpersandAmpersandToken:
-          return left && right;
-        case ts.SyntaxKind.BarBarToken:
-          return left || right;
-        case ts.SyntaxKind.QuestionQuestionToken:
-          return left ?? right;
-      }
-    }
-
-    if (ts.isParenthesizedExpression(arg)) {
-      return evaluateArgumentValue(arg.expression);
-    }
-
-    if (ts.isConditionalExpression(arg)) {
-      const condition = evaluateArgumentValue(arg.condition);
-      return condition
-        ? evaluateArgumentValue(arg.whenTrue)
-        : evaluateArgumentValue(arg.whenFalse);
-    }
-
-    if (ts.isPropertyAccessExpression(arg)) {
-      const obj = evaluateArgumentValue(arg.expression);
-      const propName = arg.name.text;
-      return obj?.[propName];
-    }
-
-    if (ts.isElementAccessExpression(arg)) {
-      const obj = evaluateArgumentValue(arg.expression);
-      const index = evaluateArgumentValue(arg.argumentExpression);
-      return obj?.[index];
-    }
-
-    if (ts.isIdentifier(arg)) {
-      return resolveIdentifier(arg);
-    }
-
-    return arg.getText();
-  }
-
-  function resolveIdentifier(identifier: ts.Identifier): any {
+  function resolveIdentifierToNode(identifier: ts.Identifier): ts.Node {
     const name = identifier.text;
 
+    // Look for local variable declaration
     const declaration = findVariableDeclarationInFile(name, sourceFile);
 
     if (declaration && declaration.initializer) {
@@ -424,18 +420,17 @@ function createEvaluator(
         );
       }
 
+      // Check if it's a macro call
       if (ts.isCallExpression(declaration.initializer)) {
         const expr = declaration.initializer.expression;
 
         if (ts.isIdentifier(expr) && expr.text.endsWith("$")) {
           const depKey = graph.createKey(sourceFile, name);
-
           trackedDependencies.push(depKey);
 
-          const value = graph.getValue(depKey);
-
-          if (value !== undefined) {
-            return value;
+          const result = graph.getResult(depKey);
+          if (result !== undefined) {
+            return result;
           }
 
           throw new Error(
@@ -444,9 +439,10 @@ function createEvaluator(
         }
       }
 
-      return evaluateArgumentValue(declaration.initializer);
+      return declaration.initializer;
     }
 
+    // Try to resolve from imports
     const resolved = resolveImportFullPath(name, sourceFile, compilerOptions);
 
     if (resolved) {
@@ -483,15 +479,16 @@ function createEvaluator(
       );
 
       if (importedDecl && importedDecl.initializer) {
+        // Check if it's a macro call
         if (ts.isCallExpression(importedDecl.initializer)) {
           const expr = importedDecl.initializer.expression;
           if (ts.isIdentifier(expr) && expr.text.endsWith("$")) {
             const depKey = graph.createKey(importedSourceFile, name);
             trackedDependencies.push(depKey);
 
-            const value = graph.getValue(depKey);
-            if (value !== undefined) {
-              return value;
+            const result = graph.getResult(depKey);
+            if (result !== undefined) {
+              return result;
             }
 
             throw new Error(
@@ -500,15 +497,7 @@ function createEvaluator(
           }
         }
 
-        const importedEvaluator = createEvaluator(
-          graph,
-          currentFileKey,
-          importedSourceFile,
-          compilerOptions
-        );
-        return importedEvaluator.evaluateArgumentValue(
-          importedDecl.initializer
-        );
+        return importedDecl.initializer;
       }
     }
 
@@ -517,50 +506,19 @@ function createEvaluator(
     );
   }
 
+  function resolveNodeValue(node: ts.Node): any {
+    if (ts.isIdentifier(node)) {
+      const resolvedNode = resolveIdentifierToNode(node);
+      return extractValueFromNode(resolvedNode);
+    }
+    return extractValueFromNode(node);
+  }
+
   return {
-    evaluateArgumentValue,
+    resolveIdentifierToNode,
+    resolveNodeValue,
     getTrackedDependencies: () => trackedDependencies,
   };
-}
-
-function extractValueFromASTNode(node: ts.Node): any {
-  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
-    return node.text;
-  }
-  if (ts.isNumericLiteral(node)) return Number(node.text);
-  if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
-  if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
-  if (node.kind === ts.SyntaxKind.NullKeyword) return null;
-  if (node.kind === ts.SyntaxKind.UndefinedKeyword) return undefined;
-
-  if (ts.isObjectLiteralExpression(node)) {
-    const obj: any = {};
-    for (const prop of node.properties) {
-      if (ts.isPropertyAssignment(prop)) {
-        const key = ts.isIdentifier(prop.name)
-          ? prop.name.text
-          : ts.isStringLiteral(prop.name)
-          ? prop.name.text
-          : ts.isNumericLiteral(prop.name)
-          ? prop.name.text
-          : ts.isComputedPropertyName(prop.name)
-          ? extractValueFromASTNode(prop.name.expression)
-          : undefined;
-
-        if (key !== undefined) {
-          obj[key] = extractValueFromASTNode(prop.initializer);
-        }
-      } else if (ts.isShorthandPropertyAssignment(prop)) {
-        obj[prop.name.text] = prop.name.text;
-      } else if (ts.isSpreadAssignment(prop)) {
-        const spread = extractValueFromASTNode(prop.expression);
-        if (typeof spread === "object" && spread !== null) {
-          Object.assign(obj, spread);
-        }
-      }
-    }
-    return obj;
-  }
 }
 
 export async function expandMacros(
@@ -596,6 +554,7 @@ export async function expandMacros(
 
   const getTypeChecker = () => getProgram()?.getTypeChecker();
 
+  // Discover all macro calls
   function discoverMacros(node: ts.Node) {
     if (ts.isVariableDeclaration(node) && node.initializer) {
       if (
@@ -615,12 +574,13 @@ export async function expandMacros(
 
   discoverMacros(sourceFile);
 
+  // Build dependency graph
   const fileNodes = graph.getNodesForFile(filePath);
 
   for (const macroNode of fileNodes) {
     if (graph.isComputed(macroNode.key)) continue;
 
-    const evaluator = createEvaluator(
+    const resolver = createNodeResolver(
       graph,
       macroNode.key,
       macroNode.sourceFile,
@@ -628,17 +588,31 @@ export async function expandMacros(
     );
 
     try {
+      // Walk through arguments to discover dependencies
       for (const arg of macroNode.node.arguments) {
-        evaluator.evaluateArgumentValue(arg);
+        function visitForDeps(n: ts.Node) {
+          if (ts.isIdentifier(n)) {
+            try {
+              resolver.resolveIdentifierToNode(n);
+            } catch (e) {
+              // Ignore resolution errors during dependency discovery
+            }
+          }
+          ts.forEachChild(n, visitForDeps);
+        }
+        visitForDeps(arg);
       }
-      const deps = evaluator.getTrackedDependencies();
 
+      const deps = resolver.getTrackedDependencies();
       for (const dep of deps) {
         graph.addDependency(macroNode.key, dep);
       }
-    } catch (e) {}
+    } catch (e) {
+      // Ignore errors during dependency discovery
+    }
   }
 
+  // Execute macros in topological order
   const sortedKeys = graph.topologicalSort();
 
   for (const key of sortedKeys) {
@@ -664,6 +638,13 @@ export async function expandMacros(
       throw new Error(`Could not get macro '${name}' for key '${key}'`);
     }
 
+    const resolver = createNodeResolver(
+      graph,
+      key,
+      macroNode.sourceFile,
+      compilerOptions
+    );
+
     const macroContext: MacroContext = {
       node,
       sourceFile: macroNode.sourceFile,
@@ -680,35 +661,26 @@ export async function expandMacros(
       error: (msg: string) => {
         throw new Error(msg);
       },
+      resolveNodeValue: resolver.resolveNodeValue,
+      resolveIdentifier: resolver.resolveIdentifierToNode,
     };
 
     try {
-      const evaluator = createEvaluator(
-        graph,
-        key,
-        macroNode.sourceFile,
-        compilerOptions
-      );
-
-      const userArgs = node.arguments.map((arg) =>
-        evaluator.evaluateArgumentValue(arg)
-      );
-
-      const result = macro(...userArgs, macroContext);
+      // Pass AST nodes directly to macro
+      const result = macro(...node.arguments, macroContext);
 
       if (!result || typeof result !== "object" || !("kind" in result)) {
         throw new Error(`Macro '${name}' must return a TypeScript AST node`);
       }
 
-      const value = extractValueFromASTNode(result);
-
-      graph.setValue(key, value, result);
+      graph.setResult(key, result);
     } catch (e: any) {
       console.error(`Macro '${name}' execution failed: ${e?.message ?? e}`);
       throw e;
     }
   }
 
+  // Transform the AST
   const transformer: ts.TransformerFactory<ts.SourceFile> = (context) => {
     const visit = (node: ts.Node): ts.Node => {
       if (ts.isVariableDeclaration(node) && node.initializer) {
@@ -722,14 +694,14 @@ export async function expandMacros(
           const macroNode = graph.getNode(key);
 
           if (macroNode && graph.isComputed(key)) {
-            const result = graph.getNode(key)!;
+            const result = graph.getResult(key)!;
 
             return context.factory.updateVariableDeclaration(
               node,
               node.name,
               node.exclamationToken,
               node.type,
-              result.astResult as any
+              result as any
             );
           }
         }
@@ -749,6 +721,16 @@ export async function expandMacros(
             const macro = macroExecuter().getMacro(resolved.importPath, name);
 
             if (macro) {
+              const tempKey = `${graph.createKey(sourceFile, "__temp__")}:${
+                node.pos
+              }`;
+              const resolver = createNodeResolver(
+                graph,
+                tempKey,
+                sourceFile,
+                compilerOptions
+              );
+
               const macroContext: MacroContext = {
                 node,
                 sourceFile,
@@ -765,24 +747,13 @@ export async function expandMacros(
                 error: (msg: string) => {
                   throw new Error(msg);
                 },
+                resolveNodeValue: resolver.resolveNodeValue,
+                resolveIdentifier: resolver.resolveIdentifierToNode,
               };
 
               try {
-                const tempKey = `${graph.createKey(sourceFile, "__temp__")}:${
-                  node.pos
-                }`;
-                const evaluator = createEvaluator(
-                  graph,
-                  tempKey,
-                  sourceFile,
-                  compilerOptions
-                );
-
-                const userArgs = node.arguments.map((arg) =>
-                  evaluator.evaluateArgumentValue(arg)
-                );
-
-                const result = macro(...userArgs, macroContext);
+                // Pass AST nodes directly to macro
+                const result = macro(...node.arguments, macroContext);
 
                 if (
                   !result ||

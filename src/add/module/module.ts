@@ -13,10 +13,10 @@ export function addFeature(name: string) {
   updateAppModule(name);
 }
 
-export function addModule(name: string, baseDir: string) {
+export function addModule(name: string, baseDir: string, root?: boolean) {
   const structure: DirEntry = {
     files: [
-      { name: `${name}.module.ts`, content: createModule(name) },
+      { name: `${name}.module.ts`, content: createModule(name, root) },
       { name: `${name}.service.ts`, content: createService(name) },
       { name: `${name}.page.tsx`, content: createPage(name) },
     ],
@@ -266,11 +266,35 @@ function addToModuleImportsArray(
   );
 }
 
-function createModule(name: string) {
+function createModule(name: string, root?: boolean) {
   const serviceName = toPascalCase(name + "_" + "Service");
   const pageName = toPascalCase(name + "_" + "Page");
   const moduleName = toPascalCase(name + "_" + "Module");
   const componentName = toPascalCase(name + "_" + "List");
+
+  if (root) {
+    return `import { Module, RouterModule, ServeStaticModule } from "@kithinji/orca";
+import { ComponentModule } from "@/component/component.module";
+import { ${serviceName} } from "./${name}.service";
+import { ${pageName} } from "./${name}.page";
+import { ${componentName} } from "./components/${name}-list.component";
+
+@Module({
+    imports: [
+      ServeStaticModule.forRoot({
+        rootPath: "./public",
+      }),
+      RouterModule.forRoot(),
+      ComponentModule
+    ],
+    providers: [${serviceName}],
+    declarations: [${pageName}, ${componentName}],
+    exports: [${serviceName}, ${pageName}],
+    bootstrap: ${pageName}
+})
+export class ${moduleName} {}
+`;
+  }
 
   return `import { Module } from "@kithinji/orca";
 import { ComponentModule } from "@/component/component.module";
@@ -282,7 +306,7 @@ import { ${componentName} } from "./components/${name}-list.component";
     imports: [ComponentModule],
     providers: [${serviceName}],
     declarations: [${pageName}, ${componentName}],
-    exports: [${serviceName}, ${pageName}]
+    exports: [${serviceName}, ${pageName}],
 })
 export class ${moduleName} {}
 `;

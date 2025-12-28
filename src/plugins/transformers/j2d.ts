@@ -105,6 +105,43 @@ class ASTUtilities {
       body.push(...statements);
     }
   }
+
+  addEffectCleanup(
+    scope: any,
+    effectCall: BabelTypes.CallExpression
+  ): BabelTypes.Statement[] {
+    const cleanupId = scope.generateUidIdentifier("cleanup");
+
+    return [
+      // const _cleanup1 = $effect(...)
+      this.t.variableDeclaration("const", [
+        this.t.variableDeclarator(cleanupId, effectCall),
+      ]),
+      // self.__cleanup = [...(self.__cleanup || []), _cleanup1]
+      this.t.expressionStatement(
+        this.t.assignmentExpression(
+          "=",
+          this.t.memberExpression(
+            this.t.identifier("self"),
+            this.t.identifier("__cleanup")
+          ),
+          this.t.arrayExpression([
+            this.t.spreadElement(
+              this.t.logicalExpression(
+                "||",
+                this.t.memberExpression(
+                  this.t.identifier("self"),
+                  this.t.identifier("__cleanup")
+                ),
+                this.t.arrayExpression([])
+              )
+            ),
+            cleanupId,
+          ])
+        )
+      ),
+    ];
+  }
 }
 
 class JSXUtilities {
@@ -370,6 +407,7 @@ class ElementTransformer {
         jsxElement.openingElement.attributes,
         elId,
         statements,
+        scope,
         context
       );
 
@@ -381,9 +419,18 @@ class ElementTransformer {
       );
     }
 
+    /*
+      let cleanup = effect(() => {
+        el.innerHTML = {
+          __html: value
+        }.__html
+      })
+    */
+
     if (hasDangerousHTML && dangerousHTMLValue) {
-      statements.push(
-        this.t.expressionStatement(
+      const effectCall = this.t.callExpression(this.t.identifier("$effect"), [
+        this.t.arrowFunctionExpression(
+          [],
           this.t.assignmentExpression(
             "=",
             this.t.memberExpression(elId, this.t.identifier("innerHTML")),
@@ -392,8 +439,15 @@ class ElementTransformer {
               this.t.identifier("__html")
             )
           )
-        )
+        ),
+      ]);
+
+      const cleanupStatements = this.astUtils.addEffectCleanup(
+        scope,
+        effectCall
       );
+
+      statements.push(...cleanupStatements);
     }
 
     if (!hasDangerousHTML) {
@@ -531,6 +585,7 @@ class ElementTransformer {
     attributes: Array<BabelTypes.JSXAttribute | BabelTypes.JSXSpreadAttribute>,
     elId: BabelTypes.Identifier,
     statements: BabelTypes.Statement[],
+    scope: any,
     context: TransformContext
   ): {
     hasRef: boolean;
@@ -555,14 +610,24 @@ class ElementTransformer {
           context.observableSignals,
           this.astUtils
         );
-        statements.push(
-          this.t.expressionStatement(
+
+        const effectCall = this.t.callExpression(this.t.identifier("$effect"), [
+          this.t.arrowFunctionExpression(
+            [],
             this.t.callExpression(this.t.identifier("$spread"), [
               elId,
               this.astUtils.replaceThisWithSelf(replaced),
             ])
-          )
+          ),
+        ]);
+
+        const cleanupStatements = this.astUtils.addEffectCleanup(
+          scope,
+          effectCall
         );
+
+        statements.push(...cleanupStatements);
+
         continue;
       }
 
@@ -610,7 +675,7 @@ class ElementTransformer {
       }
 
       if (key === "style" && this.t.isJSXExpressionContainer(attr.value)) {
-        this.processStyleAttribute(attr, elId, statements, context);
+        this.processStyleAttribute(attr, elId, statements, scope, context);
         continue;
       }
 
@@ -658,6 +723,7 @@ class ElementTransformer {
     attr: BabelTypes.JSXAttribute,
     elId: BabelTypes.Identifier,
     statements: BabelTypes.Statement[],
+    scope: any,
     context: TransformContext
   ): void {
     if (!this.t.isJSXExpressionContainer(attr.value)) return;
@@ -672,17 +738,19 @@ class ElementTransformer {
       context.observableSignals,
       this.astUtils
     );
-    statements.push(
-      this.t.expressionStatement(
+
+    const effectCall = this.t.callExpression(this.t.identifier("$effect"), [
+      this.t.arrowFunctionExpression(
+        [],
         this.t.callExpression(this.t.identifier("$style"), [
           elId,
-          this.t.arrowFunctionExpression(
-            [],
-            this.astUtils.replaceThisWithSelf(replaced)
-          ),
+          this.astUtils.replaceThisWithSelf(replaced),
         ])
-      )
-    );
+      ),
+    ]);
+    const cleanupStatements = this.astUtils.addEffectCleanup(scope, effectCall);
+
+    statements.push(...cleanupStatements);
   }
 
   private processRegularAttribute(
@@ -872,6 +940,7 @@ export function j2d({ types: t }: PluginContext): PluginObj<PluginState> {
             { local: "$style", imported: "style" },
             { local: "$spread", imported: "spread" },
             { local: "$toSignal", imported: "toSignal" },
+            { local: "$effect", imported: "effect" },
           ];
 
           for (const helper of helpers) {
@@ -913,7 +982,6 @@ export function j2d({ types: t }: PluginContext): PluginObj<PluginState> {
         const body = path.node.body;
         if (!t.isBlockStatement(body)) return;
 
-        // Collect all observables from JSX
         const observables = new Map<string, BabelTypes.Expression>();
         path.traverse({
           JSXElement(jsxPath: NodePath<BabelTypes.JSXElement>) {
@@ -932,14 +1000,12 @@ export function j2d({ types: t }: PluginContext): PluginObj<PluginState> {
           },
         });
 
-        // Add self reference
         body.body.unshift(
           t.variableDeclaration("const", [
             t.variableDeclarator(t.identifier("self"), t.thisExpression()),
           ])
         );
 
-        // Create signal declarations for observables
         const observableSignals = new Map<string, BabelTypes.Identifier>();
         const signalDeclarations: BabelTypes.Statement[] = [];
 

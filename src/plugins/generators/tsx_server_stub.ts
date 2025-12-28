@@ -12,6 +12,7 @@ interface ClassStub {
   name: string;
   propsType: string;
   decorators: string[];
+  constructorParams: string[];
 }
 
 interface ImportMap {
@@ -119,6 +120,7 @@ function extractClassStub(classDecl: ClassDeclaration): ClassStub | null {
 
   let propsType = "{}";
   const decorators: string[] = [];
+  const constructorParams: string[] = [];
 
   if (classDecl.decorators) {
     for (const dec of classDecl.decorators) {
@@ -132,6 +134,11 @@ function extractClassStub(classDecl: ClassDeclaration): ClassStub | null {
       if (member.key.type === "Identifier" && member.key.value === "props") {
         propsType = extractPropsType(member);
       }
+    } else if (member.type === "Constructor") {
+      for (const param of member.params) {
+        const paramStr = stringifyParam(param);
+        if (paramStr) constructorParams.push(paramStr);
+      }
     }
   }
 
@@ -139,18 +146,27 @@ function extractClassStub(classDecl: ClassDeclaration): ClassStub | null {
     name: className,
     propsType,
     decorators,
+    constructorParams,
   };
 }
 
-function stringifyDecorator(decorator: Decorator): string {
-  const expr = decorator.expression;
-  if (expr.type === "CallExpression" && expr.callee.type === "Identifier") {
-    return `@${expr.callee.value}()`;
-  }
-  if (expr.type === "Identifier") {
-    return `@${expr.value}`;
-  }
-  return "";
+export function stringifyDecorator(decorator: Decorator): string {
+  const exprCode = printSync({
+    type: "Module",
+    span: { start: 0, end: 0, ctxt: 0 },
+    body: [
+      {
+        type: "ExpressionStatement",
+        expression: decorator.expression,
+        span: { start: 0, end: 0, ctxt: 0 },
+      },
+    ],
+    interpreter: "",
+  }).code;
+
+  const cleanCode = exprCode.replace(/^#!.*\n/, "").trim();
+
+  return `@${cleanCode.replace(/;$/, "")}`;
 }
 
 function extractPropsType(member: any): string {
@@ -269,10 +285,14 @@ function generateClassCode(
   const decoratorsStr =
     stub.decorators.length > 0 ? stub.decorators.join("\n") + "\n" : "";
 
+  const constructorStr = stub.constructorParams.length
+    ? `constructor(${stub.constructorParams.join(", ")}) {}`
+    : "constructor() {}";
+
   return `
 ${decoratorsStr}export class ${stub.name} {
   props!: ${stub.propsType};
-  constructor() {}
+  ${constructorStr}
   build() {
     const inputProps = { ...this.props };
     return {
