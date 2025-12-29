@@ -15,6 +15,12 @@
 </a>
 </p>
 
+<p align="center">
+<a href="https://github.com/kithinjibrian/orca">
+<img src="https://img.shields.io/badge/Orca framework-blue" alt="Orca on github" />
+</a>
+</p>
+
 <hr>
 
 ## What is Pod?
@@ -391,16 +397,16 @@ That's the Pod philosophy.
 
 ## Comparison with Other CLIs
 
-| Feature | Pod | Create-React-App | Angular CLI | Next.js CLI |
-|---------|-----|------------------|-------------|-------------|
-| Project scaffolding | ✅ | ✅ | ✅ | ✅ |
-| Component generation | ✅ | ❌ | ✅ | ❌ |
-| Service generation | ✅ | ❌ | ✅ | ❌ |
-| Module generation | ✅ | ❌ | ✅ | ❌ |
-| Dev server | ✅ | ✅ | ✅ | ✅ |
-| Built-in Docker support | ✅ | ❌ | ❌ | ❌ |
-| One-command deployment | ✅ | ❌ | ❌ | ❌ |
-| Full-stack architecture | ✅ | ❌ | ❌ | Partial |
+| Feature                 | Pod | Create-React-App | Angular CLI | Next.js CLI |
+| ----------------------- | --- | ---------------- | ----------- | ----------- |
+| Project scaffolding     | ✅  | ✅               | ✅          | ✅          |
+| Component generation    | ✅  | ❌               | ✅          | ❌          |
+| Service generation      | ✅  | ❌               | ✅          | ❌          |
+| Module generation       | ✅  | ❌               | ✅          | ❌          |
+| Dev server              | ✅  | ✅               | ✅          | ✅          |
+| Built-in Docker support | ✅  | ❌               | ❌          | ❌          |
+| One-command deployment  | ✅  | ❌               | ❌          | ❌          |
+| Full-stack architecture | ✅  | ❌               | ❌          | Partial     |
 
 Pod doesn't just scaffold; it's your development companion from first line to first user.
 
