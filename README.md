@@ -233,100 +233,108 @@ pod deploy ec2 --force-install
 name: my-app
 version: 1.0.0
 
+vars:
+  deploy_path: &deploy_path "/home/ubuntu/app"
+  backup_path: &backup_path "/home/ubuntu/backups"
+
+shared_operations:
+  install_docker: &install_docker
+    type: ensure
+    ensure:
+      docker:
+        version: "28.5.2"
+        addUserToGroup: true
+
+  stop_containers: &stop_containers
+    type: action
+    action:
+      command: docker compose down --remove-orphans 2>/dev/null || true
+
+  pull_images: &pull_images
+    type: action
+    action:
+      command: docker compose pull --quiet
+
+  build_and_start: &build_and_start
+    type: action
+    action:
+      command: docker compose up -d --build --remove-orphans --wait
+
+  cleanup_docker: &cleanup_docker
+    type: action
+    action:
+      command: docker system prune -f --volumes --filter "until=168h"
+
 targets:
+  localhost:
+    type: local
+    operations:
+      #- name: "Environment Setup"
+      #  <<: *install_docker
+      - name: "Refresh Stack"
+        <<: *build_and_start
+
   ec2:
+    type: ssh
     host: ec2-xx-xx-xxx-xxx.xx-xxxx-x.compute.amazonaws.com
     user: ubuntu
     keyPath: ~/xxxx.pem
     port: 22
-    deployPath: /home/\${user}/app
+    deployPath: *deploy_path
 
     operations:
-      - name: "Setup swap space"
+      - name: "Provision Directories and Swap"
         type: ensure
         ensure:
           swap:
             size: 4G
 
       - name: "Install Docker"
-        type: ensure
-        ensure:
-          docker:
-            version: "28.5.2"
-            addUserToGroup: true
+        <<: *install_docker
 
-      - name: "Create application directories"
-        type: ensure
-        ensure:
-          directory:
-            path: \${deployPath}
-            owner: \${user}
-
-      - name: "Create backup directory"
-        type: ensure
-        ensure:
-          directory:
-            path: /home/\${user}/backups
-            owner: \${user}
-
-      - name: "Stop running containers"
-        type: action
-        action:
-          command: cd \${deployPath} && docker compose down 2>/dev/null || true
-
-      - name: "Sync application files"
+      - name: "Sync Source Files"
         type: action
         action:
           rsync:
             source: ./
-            destination: \${deployPath}/
+            destination: *deploy_path
+            delete: true
             exclude:
-              - node_modules/
               - .git/
-              - "*.log"
+              - node_modules/
               - .env.local
-              - dist/
-              - public/
+              - "*.log"
 
-      - name: "Pull Docker images"
+      - name: "Navigate to Deploy Path"
         type: action
         action:
-          command: cd \${deployPath} && docker compose pull
+          command: cd *deploy_path
 
-      - name: "Build and start containers"
+      - name: "Create Pre-deployment Backup"
         type: action
         action:
-          command: cd \${deployPath} && docker compose up -d --build --remove-orphans
+          command: tar -czf *backup_path/backup-$(date +%Y%m%d-%H%M%S).tar.gz .
 
-      - name: "Wait for services to start"
-        type: action
-        action:
-          command: sleep 10
+      - name: "Pull Latest Images"
+        <<: *pull_images
 
-      - name: "Show container status"
-        type: action
-        action:
-          command: cd \${deployPath} && docker compose ps
+      - name: "Stop Existing Stack"
+        <<: *stop_containers
 
-      - name: "Show recent logs"
-        type: action
-        action:
-          command: cd \${deployPath} && docker compose logs --tail=30
+      - name: "Build and Launch"
+        <<: *build_and_start
 
-      - name: "Cleanup old backups"
-        type: action
-        action:
-          command: find /home/\${user}/backups -name "backup-*.tar.gz" -mtime +7 -delete
-
-      - name: "Cleanup Docker resources"
-        type: action
-        action:
-          command: docker system prune -f --volumes
-
-      - name: "Verify containers are running"
+      - name: "Verify Health Status"
         type: verify
         verify:
-          command: cd \${deployPath} && docker compose ps | grep -q "Up"
+          command: ! "[ $(docker compose ps --format json | grep -qv 'running\\|healthy') ]"
+
+      - name: "Maintenance: Cleanup"
+        type: action
+        action:
+          command: |
+            find *backup_path -name "backup-*.tar.gz" -mtime +7 -delete
+            docker image prune -af --filter "until=24h"
 ```
 
 **First-time setup:**
