@@ -125,7 +125,7 @@ build
 }
 
 function genEnv() {
-  return `host=localhost
+  return `HOST=localhost
 `;
 }
 

@@ -4,6 +4,10 @@ import path from "path";
 import os from "os";
 import { NodeSSH } from "node-ssh";
 import chalk from "chalk";
+import { exec } from "child_process";
+import { promisify } from "util";
+
+const execAsync = promisify(exec);
 
 interface PodConfig {
   name: string;
@@ -12,11 +16,12 @@ interface PodConfig {
 }
 
 interface TargetConfig {
-  host: string;
-  user: string;
-  keyPath: string;
+  type?: "ssh" | "local";
+  host?: string;
+  user?: string;
+  keyPath?: string;
   port?: number;
-  deployPath: string;
+  deployPath?: string;
   operations: Operation[];
 }
 
@@ -270,45 +275,113 @@ fi
 `,
 };
 
-class RemoteShell {
-  constructor(public ssh: NodeSSH) {}
+interface ExecutionStrategy {
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
 
-  async uploadContent(remotePath: string, content: string) {
-    const localTmp = path.join(os.tmpdir(), `pod_tmp_${Date.now()}`);
-    fs.writeFileSync(localTmp, content);
-    try {
-      await this.ssh.execCommand(`mkdir -p $(dirname ${remotePath})`);
-      await this.ssh.putFile(localTmp, remotePath);
-    } finally {
-      if (fs.existsSync(localTmp)) fs.unlinkSync(localTmp);
-    }
+  runCommand(
+    cmd: string,
+    silent?: boolean
+  ): Promise<{ stdout: string; stderr: string; code: number | null }>;
+  runScript(
+    name: string,
+    content: string,
+    context: Record<string, any>
+  ): Promise<void>;
+
+  uploadContent(remotePath: string, content: string): Promise<void>;
+  readJson<T>(remotePath: string): Promise<T | null>;
+
+  syncDirectory(
+    source: string,
+    destination: string,
+    exclude?: string[]
+  ): Promise<void>;
+}
+
+class SSHStrategy implements ExecutionStrategy {
+  private ssh: NodeSSH;
+  private target: TargetConfig;
+  private currentDir: string;
+
+  constructor(target: TargetConfig) {
+    this.ssh = new NodeSSH();
+    this.target = target;
+    this.currentDir = target.deployPath || ".";
   }
 
-  async runScript(name: string, content: string, context: Record<string, any>) {
-    const interpolated = interpolate(content, context);
-    const remotePath = `/tmp/pod_script_${name}_${Date.now()}.sh`;
-    await this.uploadContent(remotePath, interpolated);
-    try {
-      await this.ssh.execCommand(`chmod +x ${remotePath}`);
-      return await this.run(remotePath, context);
-    } finally {
-      await this.ssh.execCommand(`rm -f ${remotePath}`);
-    }
+  async connect(): Promise<void> {
+    await this.ssh.connect({
+      host: this.target.host!,
+      username: this.target.user!,
+      privateKeyPath: this.target.keyPath!,
+      port: this.target.port || 22,
+    });
   }
 
-  async run(cmd: string, context: Record<string, any>, silent = false) {
-    const interpolated = interpolate(cmd, context);
-    const result = await this.ssh.execCommand(interpolated);
+  async disconnect(): Promise<void> {
+    this.ssh.dispose();
+  }
+
+  async runCommand(
+    cmd: string,
+    silent = false
+  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    const trimmed = cmd.trim();
+
+    if (trimmed.startsWith("cd ")) {
+      const newPath = trimmed.replace("cd ", "").trim();
+      this.currentDir = path.posix.resolve(this.currentDir, newPath);
+      if (!silent) console.log(chalk.gray(` [SSH Path: ${this.currentDir}]`));
+      return { stdout: "", stderr: "", code: 0 };
+    }
+
+    const result = await this.ssh.execCommand(trimmed, {
+      cwd: this.currentDir,
+    });
+
     if (result.code !== 0 && result.code !== null) {
-      throw new Error(`Execution failed: ${cmd}\nSTDERR: ${result.stderr}`);
+      throw new Error(`Execution failed: ${trimmed}\nSTDERR: ${result.stderr}`);
     }
+
     if (!silent && result.stdout) {
       result.stdout
         .split("\n")
         .filter((l) => l.startsWith("LOG:"))
         .forEach((l) => console.log(chalk.gray(` ${l.replace("LOG: ", "")}`)));
     }
+
     return result;
+  }
+
+  async runScript(
+    name: string,
+    content: string,
+    context: Record<string, any>
+  ): Promise<void> {
+    const interpolated = interpolate(content, context);
+    const remotePath = `/tmp/pod_script_${name}_${Date.now()}.sh`;
+
+    await this.uploadContent(remotePath, interpolated);
+
+    try {
+      await this.ssh.execCommand(`chmod +x ${remotePath}`);
+      await this.runCommand(remotePath);
+    } finally {
+      await this.ssh.execCommand(`rm -f ${remotePath}`);
+    }
+  }
+
+  async uploadContent(remotePath: string, content: string): Promise<void> {
+    const localTmp = path.join(os.tmpdir(), `pod_tmp_${Date.now()}`);
+    fs.writeFileSync(localTmp, content);
+
+    try {
+      await this.ssh.execCommand(`mkdir -p $(dirname ${remotePath})`);
+      await this.ssh.putFile(localTmp, remotePath);
+    } finally {
+      if (fs.existsSync(localTmp)) fs.unlinkSync(localTmp);
+    }
   }
 
   async readJson<T>(remotePath: string): Promise<T | null> {
@@ -319,223 +392,20 @@ class RemoteShell {
       return null;
     }
   }
-}
 
-export async function deploy(
-  targetName: string,
-  options?: { forceEnsure?: boolean }
-) {
-  const cwd = process.cwd();
-  const rawConfig = yaml.load(
-    fs.readFileSync(path.join(cwd, "pod.deploy.yml"), "utf8")
-  ) as any;
-
-  const rawTarget = rawConfig.targets?.[targetName];
-  if (!rawTarget) throw new Error(`Target ${targetName} not found.`);
-
-  console.log(
-    chalk.blue.bold(
-      `\n🚀 Pod Deploy: ${rawConfig.name} v${rawConfig.version} → ${targetName}\n`
-    )
-  );
-
-  let target = deepInterpolate(rawTarget, {
-    ...rawConfig,
-    ...rawTarget,
-  }) as TargetConfig;
-
-  target = resolveLocalPaths(target, cwd);
-
-  const ssh = new NodeSSH();
-  const shell = new RemoteShell(ssh);
-
-  try {
-    await ssh.connect({
-      host: target.host,
-      username: target.user,
-      privateKeyPath: target.keyPath,
-      port: target.port || 22,
-    });
-
-    const lockPath = path.posix.join(target.deployPath, "pod-lock.json");
-    let lock = (await shell.readJson<LockFile>(lockPath)) || {
-      ensures: {},
-      once_actions: [],
-    };
-
-    // Reset once_actions if version changed
-    if (lock.deployment_version !== rawConfig.version) {
-      console.log(chalk.magenta(`→ Version change: ${rawConfig.version}`));
-      lock.deployment_version = rawConfig.version;
-      lock.once_actions = [];
-      await shell.uploadContent(lockPath, JSON.stringify(lock, null, 2));
-    }
-
-    // Process all operations
-    for (const op of target.operations) {
-      try {
-        if (op.type === "ensure") {
-          await handleEnsure(op, shell, target, lock, lockPath, options);
-        } else if (op.type === "action") {
-          await handleAction(op, shell, target, lock, lockPath);
-        } else if (op.type === "verify") {
-          await handleVerify(op, shell, target);
-        } else {
-          throw new Error(`Unknown operation type: ${(op as any).type}`);
-        }
-      } catch (err: any) {
-        throw new Error(`Failed at operation "${op.name}": ${err.message}`);
-      }
-    }
-
-    console.log(chalk.green.bold(`\n✅ Deployment successful!\n`));
-  } catch (err: any) {
-    console.error(chalk.red.bold(`\n❌ Deployment Failed: ${err.message}`));
-    throw err;
-  } finally {
-    ssh.dispose();
-  }
-}
-
-async function handleEnsure(
-  op: EnsureOperation,
-  shell: RemoteShell,
-  target: TargetConfig,
-  lock: LockFile,
-  lockPath: string,
-  options?: { forceEnsure?: boolean }
-) {
-  if (!op.ensure) {
-    throw new Error(`Ensure operation "${op.name}" missing ensure config`);
-  }
-
-  if (op.ensure.swap) {
-    const key = "swap";
-    const locked = lock.ensures[key];
-    const currentConfig = op.ensure.swap;
-    const configChanged =
-      JSON.stringify(locked?.config) !== JSON.stringify(currentConfig);
-
-    if (
-      options?.forceEnsure ||
-      !locked ||
-      locked.version !== currentConfig.size ||
-      configChanged
-    ) {
-      console.log(chalk.yellow(`→ Ensuring: ${op.name}`));
-      const script = SCRIPTS.SWAP(currentConfig.size);
-      await shell.runScript(key, script, target);
-      lock.ensures[key] = {
-        version: currentConfig.size,
-        config: currentConfig,
-      };
-      await shell.uploadContent(lockPath, JSON.stringify(lock, null, 2));
-    } else {
-      console.log(chalk.gray(`✓ ${op.name} (already satisfied)`));
-    }
-  }
-
-  if (op.ensure.docker) {
-    const key = "docker";
-    const locked = lock.ensures[key];
-    const currentConfig = op.ensure.docker;
-    const configChanged =
-      JSON.stringify(locked?.config) !== JSON.stringify(currentConfig);
-
-    if (
-      options?.forceEnsure ||
-      !locked ||
-      locked.version !== currentConfig.version ||
-      configChanged
-    ) {
-      console.log(chalk.yellow(`→ Ensuring: ${op.name}`));
-      const script = SCRIPTS.DOCKER(
-        currentConfig.version,
-        target.user,
-        !!currentConfig.addUserToGroup
-      );
-      await shell.runScript(key, script, target);
-      lock.ensures[key] = {
-        version: currentConfig.version,
-        config: currentConfig,
-      };
-      await shell.uploadContent(lockPath, JSON.stringify(lock, null, 2));
-    } else {
-      console.log(chalk.gray(`✓ ${op.name} (already satisfied)`));
-    }
-  }
-
-  if (op.ensure.directory) {
-    const key = `directory_${op.ensure.directory.path}`;
-    const locked = lock.ensures[key];
-    const currentConfig = op.ensure.directory;
-    const configChanged =
-      JSON.stringify(locked?.config) !== JSON.stringify(currentConfig);
-
-    if (options?.forceEnsure || !locked || configChanged) {
-      console.log(chalk.yellow(`→ Ensuring: ${op.name}`));
-      const dirPath = interpolate(currentConfig.path, target);
-      const owner = currentConfig.owner
-        ? interpolate(currentConfig.owner, target)
-        : target.user;
-      await shell.run(`mkdir -p ${dirPath}`, target, true);
-      await shell.run(
-        `sudo chown -R ${owner}:${owner} ${dirPath}`,
-        target,
-        true
-      );
-      lock.ensures[key] = {
-        version: dirPath,
-        config: currentConfig,
-      };
-      await shell.uploadContent(lockPath, JSON.stringify(lock, null, 2));
-    } else {
-      console.log(chalk.gray(`✓ ${op.name} (already satisfied)`));
-    }
-  }
-}
-
-async function handleAction(
-  op: ActionOperation,
-  shell: RemoteShell,
-  target: TargetConfig,
-  lock: LockFile,
-  lockPath: string
-) {
-  if (!op.action) {
-    throw new Error(`Action operation "${op.name}" missing action config`);
-  }
-
-  const when = op.when || "always";
-
-  if (when === "never") {
-    console.log(chalk.gray(`⊘ ${op.name} (disabled)`));
-    return;
-  }
-
-  const actionId = `action_${op.name}`;
-
-  if (when === "once" && lock.once_actions.includes(actionId)) {
-    console.log(chalk.gray(`✓ ${op.name} (already completed)`));
-    return;
-  }
-
-  console.log(chalk.cyan(`→ Running: ${op.name}`));
-
-  if (op.action.rsync) {
-    const src = op.action.rsync.source;
-    const dest = interpolate(op.action.rsync.destination || ".", target);
-
+  async syncDirectory(
+    source: string,
+    destination: string,
+    exclude?: string[]
+  ): Promise<void> {
     const putOptions: any = { recursive: true, concurrency: 10 };
 
-    if (op.action.rsync.exclude?.length) {
-      const excludePatterns = op.action.rsync.exclude;
-
+    if (exclude?.length) {
       putOptions.validate = (filePath: string) => {
-        const relative = path.relative(src, filePath);
+        const relative = path.relative(source, filePath);
         if (relative === "") return true;
 
-        return !excludePatterns.some((pattern) => {
+        return !exclude.some((pattern) => {
           if (pattern.endsWith("/")) {
             const dir = pattern.slice(0, -1);
             const segment = "/" + dir + "/";
@@ -555,38 +425,435 @@ async function handleAction(
       };
     }
 
-    console.log(chalk.gray(` Syncing ${src} → ${dest}`));
-    await shell.ssh.putDirectory(src, dest, putOptions);
-  }
-
-  if (op.action.command) {
-    await shell.run(op.action.command, target);
-  }
-
-  if (when === "once") {
-    lock.once_actions.push(actionId);
-    await shell.uploadContent(lockPath, JSON.stringify(lock, null, 2));
+    console.log(chalk.gray(` Syncing ${source} → ${destination}`));
+    await this.ssh.putDirectory(source, destination, putOptions);
   }
 }
 
-async function handleVerify(
-  op: VerifyOperation,
-  shell: RemoteShell,
-  target: TargetConfig
+class LocalStrategy implements ExecutionStrategy {
+  private target: TargetConfig;
+  private currentDir: string;
+
+  constructor(target: TargetConfig, cwd: string) {
+    this.target = target;
+    this.currentDir = cwd;
+  }
+
+  async connect(): Promise<void> {}
+  async disconnect(): Promise<void> {}
+
+  async runCommand(
+    cmd: string,
+    silent = false
+  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    const trimmed = cmd.trim();
+
+    if (trimmed.startsWith("cd ")) {
+      const newPath = trimmed.replace("cd ", "").trim();
+      this.currentDir = path.resolve(this.currentDir, newPath);
+      if (!silent) console.log(chalk.gray(` [Local Path: ${this.currentDir}]`));
+      return { stdout: "", stderr: "", code: 0 };
+    }
+
+    try {
+      const { stdout, stderr } = await execAsync(trimmed, {
+        cwd: this.currentDir,
+      });
+
+      if (!silent && stdout) {
+        stdout
+          .split("\n")
+          .filter((l) => l.startsWith("LOG:"))
+          .forEach((l) =>
+            console.log(chalk.gray(` ${l.replace("LOG: ", "")}`))
+          );
+      }
+
+      return { stdout, stderr, code: 0 };
+    } catch (err: any) {
+      throw new Error(
+        `Execution failed: ${trimmed}\nSTDERR: ${err.stderr || err.message}`
+      );
+    }
+  }
+
+  async runScript(
+    name: string,
+    content: string,
+    context: Record<string, any>
+  ): Promise<void> {
+    const interpolated = interpolate(content, context);
+    const scriptPath = path.join(
+      os.tmpdir(),
+      `pod_script_${name}_${Date.now()}.sh`
+    );
+
+    fs.writeFileSync(scriptPath, interpolated);
+    fs.chmodSync(scriptPath, "755");
+
+    try {
+      await this.runCommand(scriptPath);
+    } finally {
+      if (fs.existsSync(scriptPath)) fs.unlinkSync(scriptPath);
+    }
+  }
+
+  async uploadContent(localPath: string, content: string): Promise<void> {
+    const dir = path.dirname(localPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(localPath, content);
+  }
+
+  async readJson<T>(localPath: string): Promise<T | null> {
+    try {
+      if (!fs.existsSync(localPath)) return null;
+      const content = fs.readFileSync(localPath, "utf8");
+      return JSON.parse(content);
+    } catch {
+      return null;
+    }
+  }
+
+  async syncDirectory(
+    source: string,
+    destination: string,
+    exclude?: string[]
+  ): Promise<void> {
+    console.log(chalk.gray(` Copying ${source} → ${destination}`));
+
+    if (!fs.existsSync(destination)) {
+      fs.mkdirSync(destination, { recursive: true });
+    }
+
+    const shouldExclude = (relativePath: string): boolean => {
+      if (!exclude?.length) return false;
+
+      return exclude.some((pattern) => {
+        if (pattern.endsWith("/")) {
+          const dir = pattern.slice(0, -1);
+          const segment = "/" + dir + "/";
+          return (
+            relativePath === dir ||
+            relativePath.startsWith(dir + "/") ||
+            relativePath.includes(segment)
+          );
+        }
+
+        if (pattern.startsWith("*.")) {
+          return relativePath.endsWith(pattern.slice(1));
+        }
+
+        return relativePath === pattern;
+      });
+    };
+
+    const copyRecursive = (src: string, dest: string) => {
+      const entries = fs.readdirSync(src, { withFileTypes: true });
+
+      for (const entry of entries) {
+        const srcPath = path.join(src, entry.name);
+        const destPath = path.join(dest, entry.name);
+        const relativePath = path.relative(source, srcPath);
+
+        if (shouldExclude(relativePath)) continue;
+
+        if (entry.isDirectory()) {
+          if (!fs.existsSync(destPath)) {
+            fs.mkdirSync(destPath, { recursive: true });
+          }
+          copyRecursive(srcPath, destPath);
+        } else {
+          fs.copyFileSync(srcPath, destPath);
+        }
+      }
+    };
+
+    copyRecursive(source, destination);
+  }
+}
+
+class StrategyFactory {
+  static create(target: TargetConfig, cwd: string): ExecutionStrategy {
+    const targetType = target.type || (target.host ? "ssh" : "local");
+
+    switch (targetType) {
+      case "ssh":
+        return new SSHStrategy(target);
+      case "local":
+        return new LocalStrategy(target, cwd);
+      default:
+        throw new Error(`Unknown target type: ${targetType}`);
+    }
+  }
+}
+
+class OperationHandler {
+  constructor(
+    private strategy: ExecutionStrategy,
+    private target: TargetConfig,
+    private lock: LockFile,
+    private lockPath: string
+  ) {}
+
+  async handleEnsure(
+    op: EnsureOperation,
+    options?: { forceEnsure?: boolean }
+  ): Promise<void> {
+    if (!op.ensure) {
+      throw new Error(`Ensure operation "${op.name}" missing ensure config`);
+    }
+
+    if (op.ensure.swap) {
+      await this.ensureSwap(op, options);
+    }
+
+    if (op.ensure.docker) {
+      await this.ensureDocker(op, options);
+    }
+
+    if (op.ensure.directory) {
+      await this.ensureDirectory(op, options);
+    }
+  }
+
+  private async ensureSwap(
+    op: EnsureOperation,
+    options?: { forceEnsure?: boolean }
+  ): Promise<void> {
+    const key = "swap";
+    const locked = this.lock.ensures[key];
+    const currentConfig = op.ensure.swap!;
+    const configChanged =
+      JSON.stringify(locked?.config) !== JSON.stringify(currentConfig);
+
+    if (
+      options?.forceEnsure ||
+      !locked ||
+      locked.version !== currentConfig.size ||
+      configChanged
+    ) {
+      console.log(chalk.yellow(`→ Ensuring: ${op.name}`));
+      const script = SCRIPTS.SWAP(currentConfig.size);
+      await this.strategy.runScript(key, script, this.target);
+      this.lock.ensures[key] = {
+        version: currentConfig.size,
+        config: currentConfig,
+      };
+      await this.saveLock();
+    } else {
+      console.log(chalk.gray(`✓ ${op.name} (already satisfied)`));
+    }
+  }
+
+  private async ensureDocker(
+    op: EnsureOperation,
+    options?: { forceEnsure?: boolean }
+  ): Promise<void> {
+    const key = "docker";
+    const locked = this.lock.ensures[key];
+    const currentConfig = op.ensure.docker!;
+    const configChanged =
+      JSON.stringify(locked?.config) !== JSON.stringify(currentConfig);
+
+    if (
+      options?.forceEnsure ||
+      !locked ||
+      locked.version !== currentConfig.version ||
+      configChanged
+    ) {
+      console.log(chalk.yellow(`→ Ensuring: ${op.name}`));
+      const script = SCRIPTS.DOCKER(
+        currentConfig.version,
+        this.target.user || os.userInfo().username,
+        !!currentConfig.addUserToGroup
+      );
+      await this.strategy.runScript(key, script, this.target);
+      this.lock.ensures[key] = {
+        version: currentConfig.version,
+        config: currentConfig,
+      };
+      await this.saveLock();
+    } else {
+      console.log(chalk.gray(`✓ ${op.name} (already satisfied)`));
+    }
+  }
+
+  private async ensureDirectory(
+    op: EnsureOperation,
+    options?: { forceEnsure?: boolean }
+  ): Promise<void> {
+    const key = `directory_${op.ensure.directory!.path}`;
+    const locked = this.lock.ensures[key];
+    const currentConfig = op.ensure.directory!;
+    const configChanged =
+      JSON.stringify(locked?.config) !== JSON.stringify(currentConfig);
+
+    if (options?.forceEnsure || !locked || configChanged) {
+      console.log(chalk.yellow(`→ Ensuring: ${op.name}`));
+      const dirPath = interpolate(currentConfig.path, this.target);
+      const owner = currentConfig.owner
+        ? interpolate(currentConfig.owner, this.target)
+        : this.target.user || os.userInfo().username;
+
+      await this.strategy.runCommand(`mkdir -p ${dirPath}`, true);
+
+      if (this.target.user) {
+        await this.strategy.runCommand(
+          `sudo chown -R ${owner}:${owner} ${dirPath}`,
+          true
+        );
+      }
+
+      this.lock.ensures[key] = {
+        version: dirPath,
+        config: currentConfig,
+      };
+      await this.saveLock();
+    } else {
+      console.log(chalk.gray(`✓ ${op.name} (already satisfied)`));
+    }
+  }
+
+  async handleAction(op: ActionOperation): Promise<void> {
+    if (!op.action) {
+      throw new Error(`Action operation "${op.name}" missing action config`);
+    }
+
+    const when = op.when || "always";
+
+    if (when === "never") {
+      console.log(chalk.gray(`⊘ ${op.name} (disabled)`));
+      return;
+    }
+
+    const actionId = `action_${op.name}`;
+
+    if (when === "once" && this.lock.once_actions.includes(actionId)) {
+      console.log(chalk.gray(`✓ ${op.name} (already completed)`));
+      return;
+    }
+
+    console.log(chalk.cyan(`→ Running: ${op.name}`));
+
+    if (op.action.rsync) {
+      const src = op.action.rsync.source;
+      const dest = interpolate(op.action.rsync.destination || ".", this.target);
+      await this.strategy.syncDirectory(src, dest, op.action.rsync.exclude);
+    }
+
+    if (op.action.command) {
+      const cmd = interpolate(op.action.command, this.target);
+      await this.strategy.runCommand(cmd);
+    }
+
+    if (when === "once") {
+      this.lock.once_actions.push(actionId);
+      await this.saveLock();
+    }
+  }
+
+  async handleVerify(op: VerifyOperation): Promise<void> {
+    if (!op.verify) {
+      throw new Error(`Verify operation "${op.name}" missing verify config`);
+    }
+
+    console.log(chalk.cyan(`→ Verifying: ${op.name}`));
+
+    if (op.verify.http) {
+      const url = interpolate(op.verify.http.url, this.target);
+      const timeout = op.verify.http.timeout || "30s";
+      await this.strategy.runCommand(
+        `curl -f --max-time ${timeout} ${url}`,
+        true
+      );
+    }
+
+    if (op.verify.command) {
+      const cmd = interpolate(op.verify.command, this.target);
+      await this.strategy.runCommand(cmd, true);
+    }
+  }
+
+  private async saveLock(): Promise<void> {
+    await this.strategy.uploadContent(
+      this.lockPath,
+      JSON.stringify(this.lock, null, 2)
+    );
+  }
+}
+
+export async function deploy(
+  targetName: string,
+  options?: { forceEnsure?: boolean }
 ) {
-  if (!op.verify) {
-    throw new Error(`Verify operation "${op.name}" missing verify config`);
-  }
+  const cwd = process.cwd();
+  const rawConfig = yaml.load(
+    fs.readFileSync(path.join(cwd, "pod.deploy.yml"), "utf8"),
+    { schema: yaml.DEFAULT_SCHEMA }
+  ) as any;
 
-  console.log(chalk.cyan(`→ Verifying: ${op.name}`));
+  const rawTarget = rawConfig.targets?.[targetName];
+  if (!rawTarget) throw new Error(`Target ${targetName} not found.`);
 
-  if (op.verify.http) {
-    const url = interpolate(op.verify.http.url, target);
-    const timeout = op.verify.http.timeout || "30s";
-    await shell.run(`curl -f --max-time ${timeout} ${url}`, target, true);
-  }
+  console.log(
+    chalk.blue.bold(
+      `\nPod Deploy: ${rawConfig.name} v${rawConfig.version} → ${targetName}\n`
+    )
+  );
 
-  if (op.verify.command) {
-    await shell.run(op.verify.command, target, true);
+  let target = deepInterpolate(rawTarget, {
+    ...rawConfig,
+    ...rawTarget,
+  }) as TargetConfig;
+
+  target = resolveLocalPaths(target, cwd);
+
+  const strategy = StrategyFactory.create(target, cwd);
+
+  try {
+    await strategy.connect();
+
+    const lockPath = target.deployPath
+      ? path.posix.join(target.deployPath, "pod-lock.json")
+      : path.join(cwd, "pod-lock.json");
+
+    let lock = (await strategy.readJson<LockFile>(lockPath)) || {
+      ensures: {},
+      once_actions: [],
+    };
+
+    if (lock.deployment_version !== rawConfig.version) {
+      console.log(chalk.magenta(`→ Version change: ${rawConfig.version}`));
+      lock.deployment_version = rawConfig.version;
+      lock.once_actions = [];
+      await strategy.uploadContent(lockPath, JSON.stringify(lock, null, 2));
+    }
+
+    const handler = new OperationHandler(strategy, target, lock, lockPath);
+
+    for (const op of target.operations) {
+      try {
+        if (op.type === "ensure") {
+          await handler.handleEnsure(op, options);
+        } else if (op.type === "action") {
+          await handler.handleAction(op);
+        } else if (op.type === "verify") {
+          await handler.handleVerify(op);
+        } else {
+          throw new Error(`Unknown operation type: ${(op as any).type}`);
+        }
+      } catch (err: any) {
+        throw new Error(`Failed at operation "${op.name}": ${err.message}`);
+      }
+    }
+
+    console.log(chalk.green.bold(`\nDeployment successful!\n`));
+  } catch (err: any) {
+    console.error(chalk.red.bold(`\nDeployment Failed: ${err.message}`));
+    throw err;
+  } finally {
+    await strategy.disconnect();
   }
 }

@@ -23,7 +23,7 @@ import { addComponent, addNew } from "./add";
 import { addFeature } from "./add/module";
 
 import path from "path";
-import { execSync } from "child_process";
+import { exec, execSync } from "child_process";
 import { dockerize } from "./docker";
 import { deploy } from "./deploy";
 import chalk from "chalk";
@@ -38,7 +38,7 @@ program
   .action(async (name: string) => {
     await addNew(name);
 
-    const appDir = path.resolve(process.cwd(), name);
+    const appDir = path.resolve(process.cwd());
 
     const shell =
       process.platform === "win32"
