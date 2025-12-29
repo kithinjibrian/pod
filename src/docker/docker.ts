@@ -272,7 +272,7 @@ targets:
     user: ubuntu
     keyPath: ~/xxxx.pem
     port: 22
-    deployPath: /home/\${ubuntu}/app
+    deployPath: /home/\${user}/app
 
     operations:
       - name: "Setup swap space"
@@ -299,7 +299,7 @@ targets:
         type: ensure
         ensure:
           directory:
-            path: /home/\${ubuntu}/backups
+            path: /home/\${user}/backups
             owner: \${user}
 
       - name: "Stop running containers"
@@ -349,7 +349,7 @@ targets:
       - name: "Cleanup old backups"
         type: action
         action:
-          command: find /home/\${ubuntu}/backups -name "backup-*.tar.gz" -mtime +7 -delete
+          command: find /home/\${user}/backups -name "backup-*.tar.gz" -mtime +7 -delete
 
       - name: "Cleanup Docker resources"
         type: action

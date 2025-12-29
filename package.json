@@ -1,7 +1,8 @@
 {
   "name": "@kithinji/pod",
   "version": "1.0.21",
-  "description": "",
+  "description": "A CLI tool for managing and deploying pods",
+  "type": "module",
   "bin": {
     "pod": "./dist/main.js"
   },
@@ -13,14 +14,36 @@
       "types": "./dist/types/main.d.ts"
     }
   },
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "node build.js"
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kithinjibrian/pod.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "module",
+  "bugs": {
+    "url": "https://github.com/kithinjibrian/pod/issues"
+  },
+  "homepage": "https://github.com/kithinjibrian/pod#readme",
+  "keywords": [
+    "cli",
+    "pod",
+    "deployment",
+    "devops",
+    "node",
+    "typescript"
+  ],
+  "author": {
+    "name": "Kithinji Brian",
+    "url": "https://github.com/kithinjibrian"
+  },
+  "license": "MIT",
+  "scripts": {
+    "build": "node build.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
   "dependencies": {
     "@babel/core": "^7.28.5",
     "@babel/plugin-syntax-jsx": "^7.27.1",

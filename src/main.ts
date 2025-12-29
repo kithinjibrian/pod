@@ -34,7 +34,7 @@ program.name("pod").description("Pod cli tool").version("1.0.21");
 
 program
   .command("new <name>")
-  .description("Start a new Pod Project")
+  .description("Start a new Orca Project")
   .action(async (name: string) => {
     await addNew(name);
 
@@ -69,6 +69,7 @@ program
       if (type === "c") {
         await addComponent(name);
       } else if (type === "f") {
+        // create a module (service, component, module)
         await addFeature(name);
       } else {
         console.error("❌ Unknown type. Use 'c' or 'f'.");
