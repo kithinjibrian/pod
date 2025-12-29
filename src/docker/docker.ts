@@ -267,8 +267,9 @@ async function createDeployfile(cwd: string, projectName: string) {
 version: 1.0.0
 
 vars:
-  deploy_path: &deploy_path "/home/ubuntu/app"
+  deploy_path: &deploy_path "/home/ubuntu/${projectName}"
   backup_path: &backup_path "/home/ubuntu/backups"
+  user: &user "ubuntu"
 
 shared_operations:
   install_docker: &install_docker
@@ -310,7 +311,7 @@ targets:
   ec2:
     type: ssh
     host: ec2-xx-xx-xxx-xxx.xx-xxxx-x.compute.amazonaws.com
-    user: ubuntu
+    user: *user
     keyPath: ~/xxxx.pem
     port: 22
     deployPath: *deploy_path
@@ -324,6 +325,20 @@ targets:
 
       - name: "Install Docker"
         <<: *install_docker
+
+      - name: "Create application directories"
+        type: ensure
+        ensure:
+          directory:
+            path: *deploy_path
+            owner: *user
+
+      - name: "Create backup directory"
+        type: ensure
+        ensure:
+          directory:
+            path: *backup_path
+            owner: *user
 
       - name: "Sync Source Files"
         type: action
