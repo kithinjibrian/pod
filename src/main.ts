@@ -30,7 +30,7 @@ import chalk from "chalk";
 
 const program = new Command();
 
-program.name("pod").description("Pod cli tool").version("1.0.24");
+program.name("pod").description("Pod cli tool").version("1.0.25");
 
 program
   .command("new <name>")
