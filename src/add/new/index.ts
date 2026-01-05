@@ -179,6 +179,9 @@ export function bootstrap() {
 }
 
 bootstrap();
+
+/* Don't modify */
+export { Navigate, getCurrentInjector } from "@kithinji/orca";
 `;
 }
 

@@ -9,7 +9,7 @@ import { generateController } from "./generators/generate_controller";
 import { generateServerStub } from "./generators/tsx_server_stub";
 import { j2d } from "./transformers/j2d";
 import { generateServerComponent } from "./generators/generate_server_component";
-import { generateRscStub } from "./generators/generate_rsc";
+import { generateRpcStub } from "./generators/generate_rpc";
 import { Store } from "@/store";
 
 interface MyPluginParams {
@@ -195,12 +195,12 @@ class ClientBuildTransformer {
     return swcTransform(scSource, path);
   }
 
-  async transformPublicFileRsc(
+  async transformPublicFileRpc(
     node: FileNode,
     source: string,
     path: string
   ): Promise<OnLoadResult> {
-    const stubSource = generateRscStub(path, source);
+    const stubSource = generateRpcStub(path, source);
     return swcTransform(stubSource, path);
   }
 
@@ -230,7 +230,7 @@ class ClientBuildTransformer {
     }
 
     if (directive === "public") {
-      return this.transformPublicFileRsc(node, source, path);
+      return this.transformPublicFileRpc(node, source, path);
     }
 
     if (directive === null) {

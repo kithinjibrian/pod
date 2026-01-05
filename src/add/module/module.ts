@@ -490,25 +490,20 @@ export class ${serviceName} {
 
 function createPage(name: string) {
   const pageName = toPascalCase(name + "_" + "Page");
-  const serviceName = toPascalCase(name + "_" + "Service");
-  const serviceVar = toCamelCase(name + "_" + "Service");
   const listComponent = toPascalCase(name + "_" + "List");
 
   return `import { Component } from "@kithinji/orca";
-import { ${serviceName} } from "./${name}.service";
 import { ${listComponent} } from "./components/${name}-list.component";
 
-@Component()
+@Component({
+  deps: [${listComponent}]
+})
 export class ${pageName} {
-    constructor(
-        public ${serviceVar}: ${serviceName}
-    ) {}
-
     build() {
         return (
             <div>
                 <h1>${toPascalCase(name)} Management</h1>
-                <${listComponent} service={this.${serviceVar}} />
+                <${listComponent} name="hello" />
             </div>
         );
     }
@@ -519,6 +514,7 @@ export class ${pageName} {
 function createListComponent(name: string) {
   const componentName = toPascalCase(name + "_" + "List");
   const serviceName = toPascalCase(name + "_" + "Service");
+  const serviceVar = toCamelCase(name + "_" + "Service");
 
   return `"use interactive";
 
@@ -528,8 +524,12 @@ import { ${serviceName} } from "../${name}.service";
 @Component()
 export class ${componentName} {
     props!: {
-        service: ${serviceName};
+        name: string;
     };
+
+    constructor(
+        public readonly ${serviceVar}: ${serviceName}
+    ) {}
 
     build() {
         return (

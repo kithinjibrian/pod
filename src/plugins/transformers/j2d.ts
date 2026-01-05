@@ -29,7 +29,7 @@ class NodeTypeGuards {
     );
   }
 
-  isObservableMember(
+  isBehaviorSubjectMember(
     expr: BabelTypes.Node
   ): expr is BabelTypes.MemberExpression {
     return (
@@ -45,7 +45,7 @@ class ASTUtilities {
   getObject(expr: BabelTypes.Expression): BabelTypes.Expression {
     if (
       this.guards.isSignalMember(expr) ||
-      this.guards.isObservableMember(expr)
+      this.guards.isBehaviorSubjectMember(expr)
     ) {
       return expr.object as BabelTypes.Expression;
     }
@@ -222,7 +222,7 @@ class ObservableManager {
     astUtils: ASTUtilities
   ): void {
     this.walkNode(node, (n: any) => {
-      if (this.guards.isObservableMember(n)) {
+      if (this.guards.isBehaviorSubjectMember(n)) {
         const observable = astUtils.replaceThisWithSelf(
           n.object as BabelTypes.Expression
         );
@@ -242,7 +242,7 @@ class ObservableManager {
     const cloned = this.t.cloneNode(node, true) as T;
 
     this.walkNode(cloned, (n: any) => {
-      if (this.guards.isObservableMember(n)) {
+      if (this.guards.isBehaviorSubjectMember(n)) {
         const observable = astUtils.replaceThisWithSelf(n.object);
         const key = this.getObservableKey(observable);
         const signalId = observableSignals.get(key);
@@ -408,7 +408,8 @@ class ElementTransformer {
         elId,
         statements,
         scope,
-        context
+        context,
+        tag
       );
 
     if (hasRef && refValue) {
@@ -538,7 +539,7 @@ class ElementTransformer {
 
         if (
           this.guards.isSignalMember(expr) ||
-          this.guards.isObservableMember(expr)
+          this.guards.isBehaviorSubjectMember(expr)
         ) {
           const replaced = this.observableManager.replaceObservablesWithSignals(
             expr,
@@ -586,7 +587,8 @@ class ElementTransformer {
     elId: BabelTypes.Identifier,
     statements: BabelTypes.Statement[],
     scope: any,
-    context: TransformContext
+    context: TransformContext,
+    tag?: string
   ): {
     hasRef: boolean;
     refValue: BabelTypes.Expression | null;
@@ -597,6 +599,8 @@ class ElementTransformer {
     let refValue: BabelTypes.Expression | null = null;
     let hasDangerousHTML = false;
     let dangerousHTMLValue: BabelTypes.Expression | null = null;
+    let hasClickHandler = false;
+    let hrefValue: string | null = null;
 
     for (const attr of attributes) {
       if (this.t.isJSXSpreadAttribute(attr)) {
@@ -670,8 +674,15 @@ class ElementTransformer {
       }
 
       if (/^on[A-Z]/.test(key)) {
+        if (key === "onClick") {
+          hasClickHandler = true;
+        }
         this.processEventListener(key, attr, elId, statements, context);
         continue;
+      }
+
+      if (key === "href" && this.t.isStringLiteral(attr.value)) {
+        hrefValue = attr.value.value;
       }
 
       if (key === "style" && this.t.isJSXExpressionContainer(attr.value)) {
@@ -682,7 +693,55 @@ class ElementTransformer {
       this.processRegularAttribute(key, attr, elId, statements, context);
     }
 
+    if (
+      tag === "a" &&
+      !hasClickHandler &&
+      hrefValue &&
+      this.isRelativeUrl(hrefValue)
+    ) {
+      statements.push(
+        this.t.expressionStatement(
+          this.t.callExpression(
+            this.t.memberExpression(
+              elId,
+              this.t.identifier("addEventListener")
+            ),
+            [
+              this.t.stringLiteral("click"),
+              this.t.arrowFunctionExpression(
+                [this.t.identifier("event")],
+                this.t.callExpression(
+                  this.t.memberExpression(
+                    this.t.identifier("Orca"),
+                    this.t.identifier("navigate")
+                  ),
+                  [this.t.identifier("event"), this.t.stringLiteral(hrefValue)]
+                )
+              ),
+            ]
+          )
+        )
+      );
+    }
+
     return { hasRef, refValue, hasDangerousHTML, dangerousHTMLValue };
+  }
+
+  private isRelativeUrl(url: string): boolean {
+    try {
+      new URL(url);
+      return false;
+    } catch {
+      if (
+        url.startsWith("#") ||
+        url.startsWith("mailto:") ||
+        url.startsWith("tel:")
+      ) {
+        return false;
+      }
+
+      return true;
+    }
   }
 
   private processEventListener(
@@ -871,7 +930,7 @@ class ElementTransformer {
           insertedValue = this.astUtils.getObject(
             expr as BabelTypes.Expression
           );
-        } else if (this.guards.isObservableMember(expr)) {
+        } else if (this.guards.isBehaviorSubjectMember(expr)) {
           const replaced = this.observableManager.replaceObservablesWithSignals(
             expr as BabelTypes.Expression,
             context.observableSignals,
@@ -1031,7 +1090,6 @@ export function j2d({ types: t }: PluginContext): PluginObj<PluginState> {
 
         const context: TransformContext = { observables, observableSignals };
 
-        // Transform JSX elements and fragments
         path.traverse({
           JSXElement(jsxPath: NodePath<BabelTypes.JSXElement>) {
             if (jsxPath.getData("processed")) return;

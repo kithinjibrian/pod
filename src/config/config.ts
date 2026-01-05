@@ -3,6 +3,7 @@ import { pathToFileURL } from "url";
 import * as fs from "fs/promises";
 import { Store } from "@/store";
 import type { Plugin } from "esbuild";
+import { HtmlPreprocessorOptions } from "@/html";
 
 export type PodPlugin = (store: Store) => Plugin;
 
@@ -16,6 +17,7 @@ export interface PodConfig {
   plugins?: Array<PodPlugin>;
   client_plugins?: Array<PodPlugin>;
   server_plugins?: Array<PodPlugin>;
+  htmlPreprocessor?: HtmlPreprocessorOptions;
 }
 
 const CONFIG_FILES = [
