@@ -19,7 +19,7 @@ import * as plugins from "./plugins";
 export { plugins };
 export * from "./plugins/css";
 
-import { addComponent, addNew } from "./add";
+import { addComponent, addNew, addTs } from "./add";
 import { addFeature } from "./add/module";
 
 import path from "path";
@@ -30,28 +30,45 @@ import chalk from "chalk";
 
 const program = new Command();
 
-program.name("pod").description("Pod cli tool").version("1.0.26");
+program.name("pod").description("Pod cli tool").version("1.0.28");
 
 program
-  .command("new <name>")
+  .command("new <name> [type]")
   .description("Start a new Orca Project")
-  .action(async (name: string) => {
-    await addNew(name);
+  .action(async (name: string, type?: string) => {
+    const orca = async () => {
+      await addNew(name);
 
-    const appDir = path.resolve(process.cwd());
+      const appDir = path.resolve(process.cwd());
 
-    const shell =
-      process.platform === "win32"
-        ? process.env.ComSpec || "cmd.exe"
-        : "/bin/sh";
+      const shell =
+        process.platform === "win32"
+          ? process.env.ComSpec || "cmd.exe"
+          : "/bin/sh";
 
-    console.log("Installing dependencies...");
-    execSync("npm install", { stdio: "inherit", cwd: appDir, shell });
+      console.log("Installing dependencies...");
+      execSync("npm install", { stdio: "inherit", cwd: appDir, shell });
 
-    console.log("Starting development server...");
-    execSync("npm run dev", { stdio: "inherit", cwd: appDir, shell });
+      console.log("Starting development server...");
+      execSync("npm run dev", { stdio: "inherit", cwd: appDir, shell });
 
-    console.log(`All done! Your app "${name}" is running in development mode.`);
+      console.log(
+        `All done! Your app "${name}" is running in development mode.`
+      );
+    };
+
+    const ts = () => {
+      addTs(name);
+    };
+
+    switch (type) {
+      case "orca":
+        return await orca();
+      case "ts":
+        return await ts();
+      default:
+        return await orca();
+    }
   });
 
 program

@@ -14,9 +14,9 @@ async function build() {
     conditions: ["node"],
   });
 
-  execSync("npx tsc --emitDeclarationOnly --declaration --outDir dist/types", {
-    stdio: "inherit",
-  });
+  // execSync("npx tsc --emitDeclarationOnly --declaration --outDir dist/types", {
+  //   stdio: "inherit",
+  // });
 }
 
 build();

@@ -266,10 +266,9 @@ async function createDeployfile(cwd: string, projectName: string) {
   const deployFile = `name: ${projectName}
 version: 1.0.0
 
-vars:
-  deploy_path: &deploy_path "/home/ubuntu/${projectName}"
-  backup_path: &backup_path "/home/ubuntu/backups"
-  user: &user "ubuntu"
+deploy_path: &deploy_path "/home/ubuntu/${projectName}"
+backup_path: &backup_path "/home/ubuntu/backups"
+user: &user "ubuntu"
 
 shared_operations:
   install_docker: &install_docker
@@ -356,12 +355,12 @@ targets:
       - name: "Navigate to Deploy Path"
         type: action
         action:
-          command: cd *deploy_path
+          command: cd \${deploy_path}
 
       - name: "Create Pre-deployment Backup"
         type: action
         action:
-          command: tar -czf *backup_path/backup-$(date +%Y%m%d-%H%M%S).tar.gz .
+          command: tar -czf \${backup_path}/backup-$(date +%Y%m%d-%H%M%S).tar.gz .
 
       - name: "Pull Latest Images"
         <<: *pull_images
@@ -371,11 +370,6 @@ targets:
 
       - name: "Build and Launch"
         <<: *build_and_start
-
-      - name: "Verify Health Status"
-        type: verify
-        verify:
-          command: ! "[ $(docker compose ps --format json | grep -qv 'running\\|healthy') ]"
 
       - name: "Maintenance: Cleanup"
         type: action
