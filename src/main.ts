@@ -57,8 +57,18 @@ program
       );
     };
 
-    const ts = () => {
-      addTs(name);
+    const ts = async () => {
+      await addTs(name);
+
+      const appDir = path.resolve(process.cwd());
+
+      const shell =
+        process.platform === "win32"
+          ? process.env.ComSpec || "cmd.exe"
+          : "/bin/sh";
+
+      console.log("Installing dependencies...");
+      execSync("npm install", { stdio: "inherit", cwd: appDir, shell });
     };
 
     switch (type) {

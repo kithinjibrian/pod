@@ -47,6 +47,9 @@ export async function addTs(name: string) {
   };
 
   createStructure(baseDir, structure);
+
+  process.chdir(baseDir);
+
   console.log(`TypeScript project created for ${target} environment`);
 }
 
@@ -78,6 +81,7 @@ function genPackageJson(name: string, target: "browser" | "node" | "both") {
     devDependencies: {
       typescript: "^5.9.3",
       esbuild: "^0.27.2",
+      "@types/node": "^25.0.3",
     },
   };
 
@@ -138,9 +142,9 @@ function genTsConfig(target: "browser" | "node" | "both") {
 }
 
 function genBuildConfig(name: string, target: "browser" | "node" | "both") {
-  return `const esbuild = require('esbuild');
-const { execSync } = require('child_process');
-const path = require('path');
+  return `import * as esbuild from "esbuild";
+import { execSync } from "child_process";
+import path from "path";
 
 const isWatch = process.argv.includes('--watch');
 
@@ -148,14 +152,13 @@ const isWatch = process.argv.includes('--watch');
 const aliasPlugin = {
   name: 'alias',
   setup(build) {
-    build.onResolve({ filter: /^@\\
+    build.onResolve({ filter: /^@\\/ }, args => {
       return {
         path: path.resolve(__dirname, 'src', args.path.slice(2))
       };
     });
   }
 };
-
 
 const buildConfigs = ${JSON.stringify(getBuildConfigs(target), null, 2).replace(
     /"plugins": null/g,
