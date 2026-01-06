@@ -152,7 +152,7 @@ const isWatch = process.argv.includes('--watch');
 const aliasPlugin = {
   name: 'alias',
   setup(build) {
-    build.onResolve({ filter: /^@\\/ }, args => {
+    build.onResolve({ filter: /^@\/ }, args => {
       return {
         path: path.resolve(__dirname, 'src', args.path.slice(2))
       };
